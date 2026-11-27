@@ -27,6 +27,30 @@ export function calculateProratedFirstMonthRent(monthlyRent: number, startDateUT
   return { amount, isProrated, daysInMonth, remainingDays };
 }
 
+// Calculate inclusive prorated rent for the last month (1st through endDay, or startDay through endDay if same month)
+export function calculateProratedLastMonthRent(
+  monthlyRent: number,
+  endDateUTC: Date,
+  sameMonthStartUTC?: Date
+): {
+  amount: number;
+  isProrated: boolean;
+  daysInMonth: number;
+  remainingDays: number;
+} {
+  const year = endDateUTC.getUTCFullYear();
+  const month = endDateUTC.getUTCMonth();
+  const endDay = endDateUTC.getUTCDate();
+  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const startDay = sameMonthStartUTC ? sameMonthStartUTC.getUTCDate() : 1;
+  const remainingDays = Math.max(1, endDay - startDay + 1);
+  const isProrated = remainingDays < daysInMonth;
+  const amount = isProrated
+    ? Math.round((monthlyRent / daysInMonth) * remainingDays * 100) / 100
+    : monthlyRent;
+  return { amount, isProrated, daysInMonth, remainingDays };
+}
+
 // Helper function to parse YYYY-MM-DD string into midnight UTC Date
 export function parseDateUTC(dateStr: string): Date | null {
   if (!dateStr) return null;
@@ -63,6 +87,8 @@ export async function generateAutoInvoices() {
         tenant: true,
         property: true,
         unit: true,
+        renewal: true,
+        moveOut: true,
       },
     });
 
@@ -76,10 +102,20 @@ export async function generateAutoInvoices() {
         : parseDateUTC(lease.startDate.toISOString());
       if (!start || start > today) continue;
 
-      const end = lease.endDate ? parseDateUTC(lease.endDate.toISOString()) : new Date(Date.UTC(2099, 11, 31));
+      let end = lease.endDate ? parseDateUTC(lease.endDate.toISOString()) : new Date(Date.UTC(2099, 11, 31));
       if (!end) continue;
 
+      // If an active MoveOut is scheduled earlier than lease.endDate, stop & prorate at moveOut.scheduledDate
+      if (lease.moveOut && lease.moveOut.status !== 'CANCELLED' && lease.moveOut.scheduledDate) {
+        const moveOutEnd = parseDateUTC(lease.moveOut.scheduledDate.toISOString());
+        if (moveOutEnd && moveOutEnd < end) {
+          end = moveOutEnd;
+        }
+      }
 
+      // Option A: If renewal was accepted for this lease, tenant continues into next lease without end-month proration
+      const isRenewalAccepted = lease.renewal?.status === 'ACCEPTED';
+      const endYearMonth = end.toISOString().slice(0, 7);
 
       // Verify today is not past lease end date
       const limitDate = today < end ? today : end;
@@ -113,8 +149,14 @@ export async function generateAutoInvoices() {
         if (!existingYearMonths.has(billingYearMonth)) {
           const tenantName = lease.tenant ? `${lease.tenant.firstName || ''} ${lease.tenant.lastName || ''}`.trim() : 'Tenant';
           const isFirstMonth = elapsedMonths === 0;
-          const proration = isFirstMonth
+          const isLastMonth = !isRenewalAccepted && billingYearMonth === endYearMonth;
+
+          const proration = isFirstMonth && isLastMonth
+            ? calculateProratedLastMonthRent(lease.rentAmount, end, start)
+            : isFirstMonth
             ? calculateProratedFirstMonthRent(lease.rentAmount, start)
+            : isLastMonth
+            ? calculateProratedLastMonthRent(lease.rentAmount, end)
             : { amount: lease.rentAmount, isProrated: false, daysInMonth: 0, remainingDays: 0 };
           const invoiceAmount = proration.amount;
           const lineItems = [

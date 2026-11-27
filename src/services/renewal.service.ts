@@ -129,7 +129,15 @@ export class RenewalService {
         leaseId,
         ...(companyId ? { lease: { companyId } } : {}),
       },
-      include: { lease: true },
+      include: {
+        lease: {
+          include: {
+            tenant: true,
+            property: true,
+            unit: true,
+          },
+        },
+      },
     });
     if (!renewal) throw new Error('Renewal record not found.');
     if (renewal.status === 'ACCEPTED') throw new Error('Renewal already accepted.');
@@ -168,6 +176,63 @@ export class RenewalService {
         },
       });
 
+      // Option A continuation: if end month already had a prorated invoice (e.g. 1-15 Jan), cover the rest of the month
+      const oldEndDate = new Date(renewal.lease.endDate);
+      const endYM = oldEndDate.toISOString().slice(0, 7);
+      const existingProrated = await tx.invoice.findFirst({
+        where: {
+          tenantId: renewal.lease.tenantId,
+          dueDate: { startsWith: endYM },
+          lineItems: { contains: 'Prorated Rent' },
+        },
+      });
+
+      if (existingProrated) {
+        const oldRent = Number(renewal.lease.rentAmount || 0);
+        const proratedAmt = Number(existingProrated.amount || 0);
+        if (oldRent > proratedAmt) {
+          if (Number(existingProrated.paidAmount || 0) === 0) {
+            await tx.invoice.update({
+              where: { id: existingProrated.id },
+              data: {
+                amount: oldRent,
+                balance: oldRent,
+                lineItems: JSON.stringify([{ description: 'Rent Charge', amount: oldRent }]),
+                notes: `Full month rent for ${endYM} after lease renewal acceptance`,
+              },
+            });
+          } else {
+            const remainingAmt = Math.round((oldRent - proratedAmt) * 100) / 100;
+            const daysInMonth = new Date(Date.UTC(oldEndDate.getUTCFullYear(), oldEndDate.getUTCMonth() + 1, 0)).getUTCDate();
+            const nextDay = Math.min(oldEndDate.getUTCDate() + 1, daysInMonth);
+            const remainingDueDate = `${endYM}-${String(nextDay).padStart(2, '0')}`;
+            const tenantName = renewal.lease.tenant
+              ? `${renewal.lease.tenant.firstName || ''} ${renewal.lease.tenant.lastName || ''}`.trim()
+              : 'Tenant';
+
+            await tx.invoice.create({
+              data: {
+                tenantId: renewal.lease.tenantId,
+                tenantName,
+                propertyId: renewal.lease.propertyId,
+                propertyName: renewal.lease.property?.name || 'Property',
+                unitNumber: renewal.lease.unit?.unitNumber || 'Unit',
+                dueDate: remainingDueDate,
+                amount: remainingAmt,
+                balance: remainingAmt,
+                paidAmount: 0,
+                status: 'Sent',
+                lineItems: JSON.stringify([
+                  { description: 'Remaining Month Rent Charge (Renewal Continuation)', amount: remainingAmt },
+                ]),
+                notes: `Remaining month rent for ${endYM} after lease renewal acceptance`,
+                companyId: renewal.lease.companyId,
+              },
+            });
+          }
+        }
+      }
+
       return { renewal: updatedRenewal, newLease };
     });
   }
@@ -179,7 +244,15 @@ export class RenewalService {
         leaseId,
         ...(companyId ? { lease: { companyId } } : {}),
       },
-      include: { lease: true },
+      include: {
+        lease: {
+          include: {
+            tenant: true,
+            property: true,
+            unit: true,
+          },
+        },
+      },
     });
     if (!renewal) throw new Error('Renewal record not found.');
     if (renewal.status === 'REJECTED') throw new Error('Renewal already rejected.');
