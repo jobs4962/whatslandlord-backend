@@ -6,6 +6,7 @@ import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 import { env } from '../config/env';
 import { createNotification } from '../services/notification.helper';
 import { emailService } from '../services/email.service';
+import { getNewYorkDateStr } from '../services/billingAutomation.service';
 
 class InvoiceController {
   async getAll(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -180,7 +181,7 @@ class InvoiceController {
           propertyId: propertyId || 'default',
           propertyName: propertyName || 'Unknown Property',
           unitNumber: unitNumber || '',
-          dueDate: typeof dueDate === 'string' ? dueDate : (isNaN(parsedDueDate.getTime()) ? new Date().toISOString().split('T')[0] : parsedDueDate.toISOString().split('T')[0]),
+          dueDate: typeof dueDate === 'string' ? dueDate.split('T')[0] : (isNaN(parsedDueDate.getTime()) ? getNewYorkDateStr() : getNewYorkDateStr(parsedDueDate)),
           amount: parseFloat(amount) || 0,
           paidAmount: parseFloat(paidAmount) || 0,
           balance: parseFloat(balance ?? amount) || 0,

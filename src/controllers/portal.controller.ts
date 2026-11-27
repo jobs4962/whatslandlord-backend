@@ -4,6 +4,7 @@ import { sendSuccess } from '../utils/apiResponse';
 import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 import cloudinary from '../config/cloudinary';
 import { createNotification } from '../services/notification.helper';
+import { getNewYorkDateStr } from '../services/billingAutomation.service';
 
 export class PortalController {
   // --- Helper to get tenant for logged in user ---
@@ -2246,7 +2247,7 @@ export class PortalController {
           amount: parsedAmount,
           balance: isPaid ? 0 : (req.body.balance !== undefined ? parseFloat(req.body.balance) : parsedAmount),
           paidAmount: isPaid ? parsedAmount : (req.body.paidAmount !== undefined ? parseFloat(req.body.paidAmount) : 0),
-          dueDate: String(dueDate || new Date().toISOString().split('T')[0]),
+          dueDate: String(dueDate || getNewYorkDateStr()),
           status: status || (isPaid ? 'Paid' : 'Sent'),
           lineItems: JSON.stringify(req.body.lineItems || []),
         },

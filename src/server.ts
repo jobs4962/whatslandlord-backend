@@ -197,15 +197,6 @@ prisma.$connect()
     }, {
       timezone: 'America/New_York'
     });
-
-    // Schedule 12:58 PM IST Test Cron
-    cron.schedule('58 12 * * *', () => {
-      logger.info('⏰ Running scheduled 12:58 PM IST test billing cron...');
-      generateAutoInvoices().catch(e => logger.error(e, '12:58 PM auto-invoices error'));
-      generateAutoLateFees().catch(e => logger.error(e, '12:58 PM auto-late-fees error'));
-    }, {
-      timezone: 'Asia/Kolkata'
-    });
   })
   .catch((error: Error) => {
     logger.error(error, '❌ Failed to connect to the MySQL database:');

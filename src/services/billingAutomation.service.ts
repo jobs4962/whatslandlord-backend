@@ -1,9 +1,18 @@
 import prisma from '../config/database';
 import { emailService } from './email.service';
 
+// Helper function to get YYYY-MM-DD in America/New_York timezone
+export function getNewYorkDateStr(input?: Date | string): string {
+  const d = input ? (input instanceof Date ? input : new Date(input)) : new Date();
+  if (isNaN(d.getTime())) {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  }
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
 // Helper function to get current Date at midnight (00:00:00 UTC) matching America/New_York timezone date
 export function getNewYorkDate(): Date {
-  const nyDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const nyDateStr = getNewYorkDateStr();
   const [year, month, day] = nyDateStr.split('-').map(Number);
   return new Date(Date.UTC(year, month - 1, day));
 }

@@ -4,6 +4,7 @@ import { AppError } from '../utils/appError';
 import { decrypt } from '../utils/crypto';
 import { whatsappService } from './whatsapp.service';
 import * as crypto from 'crypto';
+import { getNewYorkDateStr } from './billingAutomation.service';
 
 
 export class PaymentService {
@@ -815,9 +816,9 @@ export class PaymentService {
 
     return prisma.$transaction(async (tx: any) => {
       const payMonth = payment.dueDate
-        ? new Date(payment.dueDate).toISOString().slice(0, 7)
+        ? getNewYorkDateStr(payment.dueDate).slice(0, 7)
         : payment.paidDate
-        ? new Date(payment.paidDate).toISOString().slice(0, 7)
+        ? getNewYorkDateStr(payment.paidDate).slice(0, 7)
         : '';
       const rawTenantInvoices = await tx.invoice.findMany({
         where: { tenantId: payment.tenantId },
