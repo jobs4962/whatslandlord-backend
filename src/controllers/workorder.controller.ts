@@ -28,6 +28,9 @@ export class WorkOrderController {
       const formattedWorkOrders = workOrders.map((wo: any, index: number) => {
         const est = Number(wo.estimatedCost || 0);
         const act = Number(wo.actualCost || wo.cost || est);
+        const extra = Number(wo.extraExpenses || 0);
+        const materials = Number(wo.materialsCost || 0);
+        const totalCost = act + extra + materials;
         return {
           id: wo.id,
           workOrderNumber: `WO-${1001 + index}`,
@@ -42,8 +45,9 @@ export class WorkOrderController {
           status: wo.status === 'Open' || wo.status === 'Submitted' ? 'Open' : wo.status === 'InProgress' || wo.status === 'In Progress' ? 'In Progress' : wo.status === 'Completed' ? 'Completed' : wo.status === 'Cancelled' ? 'Cancelled' : wo.status || 'Open',
           estimatedCost: est,
           actualCost: act,
-          extraExpenses: wo.extraExpenses || 0,
-          labourCost: wo.labourCost || 0,
+          extraExpenses: extra,
+          labourCost: Number(wo.labourCost || 0),
+          totalCost,
           title: wo.title,
           description: wo.description,
           createdAt: wo.createdAt ? new Date(wo.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
@@ -55,6 +59,9 @@ export class WorkOrderController {
       const formattedServiceRequests = serviceRequests.map((sr: any, index: number) => {
         const est = Number(sr.estimatedCost || 0);
         const act = Number(sr.labourCost || sr.cost || 0);
+        const extra = Number(sr.extraExpenses || 0);
+        const materials = Number(sr.materialsCost || 0);
+        const totalCost = act + extra + materials;
         return {
           id: sr.id,
           workOrderNumber: `SR-${1001 + index}`,
@@ -70,8 +77,9 @@ export class WorkOrderController {
           status: sr.status === 'Open' || sr.status === 'New' || sr.status === 'Submitted' ? 'Open' : sr.status === 'InProgress' || sr.status === 'In Progress' ? 'In Progress' : sr.status === 'Completed' ? 'Completed' : sr.status === 'Closed' ? 'Closed' : sr.status === 'Rejected' ? 'Rejected' : sr.status === 'Assigned' ? 'Assigned' : sr.status || 'Open',
           estimatedCost: est,
           actualCost: act,
-          extraExpenses: sr.extraExpenses || 0,
-          labourCost: sr.labourCost || 0,
+          extraExpenses: extra,
+          labourCost: Number(sr.labourCost || 0),
+          totalCost,
           title: sr.title,
           description: sr.description || '',
           createdAt: sr.createdAt ? new Date(sr.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
@@ -120,6 +128,7 @@ export class WorkOrderController {
             actualCost: wo.actualCost || 0,
             extraExpenses: wo.extraExpenses || 0,
             labourCost: wo.labourCost || 0,
+            totalCost: Number(wo.actualCost || (wo as any).cost || 0) + Number(wo.extraExpenses || 0) + Number((wo as any).materialsCost || 0),
             title: wo.title,
             description: wo.description,
             createdAt: wo.createdAt ? new Date(wo.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
@@ -219,6 +228,7 @@ export class WorkOrderController {
             actualCost: sr.labourCost || sr.cost || 0,
             extraExpenses: sr.extraExpenses || 0,
             labourCost: sr.labourCost || 0,
+            totalCost: Number(sr.labourCost || sr.cost || 0) + Number(sr.extraExpenses || 0) + Number((sr as any).materialsCost || 0),
             title: sr.title,
             description: sr.description,
             createdAt: sr.createdAt ? new Date(sr.createdAt).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],

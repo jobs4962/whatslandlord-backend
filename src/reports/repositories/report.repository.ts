@@ -921,7 +921,9 @@ export class ReportRepository {
 
     const formattedWOs = allWorkOrders.map((w: any) => {
       const est = Number(w.estimatedCost || 0);
-      const act = Number(w.actualCost || w.cost || est);
+      const baseAct = Number(w.actualCost || w.cost || est);
+      const extra = Number(w.extraExpenses || 0) + Number(w.materialsCost || 0);
+      const act = baseAct + extra;
       return {
         id: w.id,
         propertyId: w.propertyId,
@@ -942,7 +944,9 @@ export class ReportRepository {
 
     const formattedSRs = allServiceRequests.map((sr: any) => {
       const est = Number(sr.estimatedCost || 0);
-      const act = Number(sr.cost || sr.labourCost || est);
+      const baseAct = Number(sr.cost || sr.labourCost || est);
+      const extra = Number(sr.extraExpenses || 0) + Number(sr.materialsCost || 0);
+      const act = baseAct + extra;
       return {
         id: sr.id,
         propertyId: sr.propertyId,
