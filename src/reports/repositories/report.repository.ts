@@ -528,67 +528,6 @@ export class ReportRepository {
       return { invoices: [], totalRecords: 0, summary: { totalDelinquentBalance: 0, totalOriginalAmount: 0, totalDelinquentTenants: 0, totalDelinquentInvoices: 0, averageDaysLate: 0 } };
     }
 
-    // Auto-reconcile invoices with actual rentPayment records
-    try {
-      const propertyInvoices = await prisma.invoice.findMany({
-        where: {
-          propertyId: { in: activePropertyIds },
-          ...(params.companyId ? { companyId: params.companyId } : {}),
-          ...(tenantId ? { tenantId } : {}),
-          ...(softDeleted.invoices.length > 0 ? { id: { notIn: softDeleted.invoices } } : {}),
-        },
-      });
-
-      const propertyPayments: any[] = await prisma.rentPayment.findMany({
-        where: {
-          propertyId: { in: activePropertyIds },
-          ...(params.companyId ? { companyId: params.companyId } : {}),
-          ...(tenantId ? { tenantId } : {}),
-          ...(softDeleted.payments.length > 0 ? { id: { notIn: softDeleted.payments } } : {}),
-          status: { in: ['Paid', 'PartiallyPaid'] as any },
-        },
-        include: {
-          tenant: true,
-        },
-      });
-
-      for (const inv of propertyInvoices) {
-        const invMonth = String(inv.dueDate || '').slice(0, 7);
-        if (!invMonth) continue;
-
-        const matchedPayments = propertyPayments.filter((p: any) => {
-          if (p.invoiceId && p.invoiceId === inv.id) return true;
-          const pMonth = String(p.dueDate || p.paidDate || '').slice(0, 7);
-          const pTenantName = p.tenant ? `${p.tenant.firstName} ${p.tenant.lastName}` : (p.tenantName || '');
-          const tMatch = (p.tenantId && inv.tenantId && p.tenantId === inv.tenantId) ||
-            (pTenantName && inv.tenantName && pTenantName.trim().toLowerCase() === inv.tenantName.trim().toLowerCase());
-          return tMatch && pMonth === invMonth;
-        });
-
-        if (matchedPayments.length > 0 || propertyPayments.some(p => p.tenantId === inv.tenantId)) {
-          const actualPaid = matchedPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
-          const actualBalance = Math.max(0, Number(inv.amount || 0) - actualPaid);
-          const newStatus = actualBalance === 0 ? 'Paid' : (actualPaid > 0 ? 'Partially Paid' : 'Overdue');
-
-          if (Math.abs(Number(inv.paidAmount || 0) - actualPaid) > 0.01 || Math.abs(Number(inv.balance || 0) - actualBalance) > 0.01 || inv.status !== newStatus) {
-            await prisma.invoice.update({
-              where: { id: inv.id },
-              data: {
-                paidAmount: actualPaid,
-                balance: actualBalance,
-                status: newStatus,
-              },
-            });
-            inv.paidAmount = actualPaid;
-            inv.balance = actualBalance;
-            inv.status = newStatus;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Delinquency auto-reconciliation warning:', e);
-    }
-
     const whereClause: any = {
       propertyId: { in: activePropertyIds },
       ...(params.companyId ? { companyId: params.companyId } : {}),
