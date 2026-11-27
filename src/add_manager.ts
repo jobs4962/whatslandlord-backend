@@ -15,7 +15,7 @@ async function main() {
   const role = await prisma.role.findFirst({
     where: { name: 'Property Manager' }
   });
-
+  
   if (!role) {
     throw new Error('Property Manager role not found in database.');
   }
