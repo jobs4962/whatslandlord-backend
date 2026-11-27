@@ -1,0 +1,600 @@
+import prisma from '../config/database';
+import { AppError } from '../utils/appError';
+import cloudinary from '../config/cloudinary';
+import { getManagerCompanyId } from '../utils/companyHelper';
+import { encrypt } from '../utils/crypto';
+
+export class PropertyService {
+  async getAllProperties(companyId?: string, user?: any) {
+    if (!companyId && user?.roleName !== 'SuperAdmin' && user?.role !== 'SuperAdmin') {
+      if ((user?.roleName === 'Owner' || user?.role === 'Owner') && user?.email) {
+        const owner = await prisma.owner.findFirst({
+          where: { email: user.email },
+        });
+        if (owner) {
+          const properties = await prisma.property.findMany({
+            where: { ownerId: owner.id, status: { notIn: ['Inactive', 'Deleted'] } },
+            include: {
+              owner: true,
+              buildings: true,
+              units: {
+                include: {
+                  leases: {
+                    include: {
+                      tenant: true,
+                    },
+                  },
+                  tenants: true,
+                },
+              },
+            },
+          });
+          return properties.map((p: any) => ({
+            ...p,
+            hasPaymentToken: !!p.encryptedPaymentToken,
+            encryptedPaymentToken: undefined,
+            paymentTokenIv: undefined,
+          }));
+        }
+      }
+      return [];
+    }
+
+    let whereClause: any = companyId ? { companyId, status: { notIn: ['Inactive', 'Deleted'] } } : { status: { notIn: ['Inactive', 'Deleted'] } };
+
+    if ((user?.roleName === 'Owner' || user?.role === 'Owner') && user?.email) {
+      const owner = await prisma.owner.findFirst({
+        where: { email: user.email, ...(companyId ? { companyId } : {}) },
+      });
+      if (owner) {
+        whereClause.ownerId = owner.id;
+      } else {
+        return [];
+      }
+    }
+
+    const properties = await prisma.property.findMany({
+      where: whereClause,
+      include: {
+        owner: true,
+        buildings: true,
+        units: {
+          include: {
+            leases: {
+              include: {
+                tenant: true,
+              },
+            },
+            tenants: true,
+          },
+        },
+      },
+    });
+
+    return properties.map((p: any) => ({
+      ...p,
+      hasPaymentToken: !!p.encryptedPaymentToken,
+      encryptedPaymentToken: undefined,
+      paymentTokenIv: undefined,
+    }));
+  }
+
+  async getPropertyById(id: string, companyId?: string) {
+    const prop: any = await prisma.property.findFirst({
+      where: companyId ? { id, companyId } : { id },
+      include: {
+        owner: true,
+        buildings: true,
+        units: {
+          include: {
+            leases: {
+              include: {
+                tenant: true,
+              },
+            },
+            tenants: true,
+          },
+        },
+      },
+    });
+    if (!prop) throw new AppError('Property not found.', 404, 'NOT_FOUND');
+
+    return {
+      ...prop,
+      hasPaymentToken: !!prop.encryptedPaymentToken,
+      encryptedPaymentToken: undefined,
+      paymentTokenIv: undefined,
+    };
+  }
+
+  async createProperty(data: any, file?: any) {
+    const companyId = await getManagerCompanyId(undefined, data.companyId);
+
+    if (companyId) {
+      const company = await prisma.company.findUnique({ where: { id: companyId } });
+      if (company) {
+        const currentCount = await prisma.property.count({
+          where: { companyId, status: { notIn: ['Inactive', 'Deleted'] } },
+        });
+        const maxLimit = company.maxProperties || 50;
+        if (currentCount >= maxLimit) {
+          throw new AppError(
+            `Property creation limit reached! Your plan (${company.planName}) permits up to ${maxLimit} properties. Please upgrade your subscription plan.`,
+            403,
+            'PLAN_LIMIT_EXCEEDED'
+          );
+        }
+      }
+    }
+
+    let ownerId = data.ownerId;
+    let ownerExists = false;
+
+    if (ownerId) {
+      try {
+        const owner = await prisma.owner.findFirst({
+          where: companyId ? { id: ownerId, companyId } : { id: ownerId },
+        });
+        if (owner) {
+          ownerExists = true;
+        } else {
+          throw new AppError('Owner not found or does not belong to your company.', 404, 'NOT_FOUND');
+        }
+      } catch (e) {
+        if (e instanceof AppError) throw e;
+        // ignore
+      }
+    }
+
+    let companyName = '';
+    if (companyId) {
+      const comp = await prisma.company.findUnique({ where: { id: companyId }, select: { name: true } });
+      if (comp?.name) companyName = comp.name;
+    }
+
+    if (!ownerExists) {
+      const firstOwner = await prisma.owner.findFirst({
+        where: companyId ? { companyId } : {},
+      });
+      if (firstOwner) {
+        ownerId = firstOwner.id;
+      } else {
+        const defaultOwner = await prisma.owner.create({
+          data: {
+            name: companyName ? `${companyName} Owner` : 'Portfolio Owner',
+            email: `owner.${Date.now()}@example.com`,
+            phone: '',
+            companyId,
+          }
+        });
+        ownerId = defaultOwner.id;
+      }
+    }
+
+    let typeVal = (data.type || 'Apartment').replace(/\s+/g, '');
+    if (typeVal === 'MUP' || typeVal.includes('Mixed') || typeVal.includes('MUP')) {
+      typeVal = 'Commercial';
+    }
+    const validTypes = ['Apartment', 'Commercial', 'SingleFamily', 'MultiFamily', 'HOA'];
+    if (!validTypes.includes(typeVal)) {
+      typeVal = 'Apartment';
+    }
+
+    // Cloudinary upload
+    let imageUrl = data.imageUrl || null;
+    if (file) {
+      try {
+        imageUrl = await new Promise<string>((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            { folder: 'properties' },
+            (error, result) => {
+              if (error) return reject(error);
+              resolve(result?.secure_url || '');
+            }
+          );
+          uploadStream.end(file.buffer);
+        });
+      } catch (err) {
+        console.error('Cloudinary image upload failed:', err);
+      }
+    }
+
+    let paymentProvider = data.paymentProvider || 'COMPANY_DEFAULT';
+    let paymentAccountId = data.paymentAccountId || null;
+    let encryptedPaymentToken: string | null = null;
+    let paymentTokenIv: string | null = null;
+    let paymentStatus = data.paymentStatus || 'Active';
+
+    if (paymentProvider && paymentProvider !== 'COMPANY_DEFAULT' && data.paymentAuthToken) {
+      try {
+        const encrypted = encrypt(data.paymentAuthToken);
+        encryptedPaymentToken = encrypted.encryptedText;
+        paymentTokenIv = encrypted.iv;
+      } catch (e) {
+        console.error('Failed to encrypt property payment token', e);
+      }
+    } else if (paymentProvider === 'COMPANY_DEFAULT') {
+      paymentAccountId = null;
+    }
+
+    const streetAddress = (data.streetAddress || data.address || '').trim();
+    const city = (data.city || '').trim();
+    const state = (data.state || '').trim();
+    const zip = (data.zip || '').trim();
+    const country = (data.country || 'USA').trim();
+    const fullAddress = (data.address || [streetAddress, city, state, zip].filter(Boolean).join(', ')).trim();
+
+    const createdProp = await prisma.property.create({
+      data: {
+        name: data.name,
+        type: typeVal as any,
+        status: data.status || 'Active',
+        ownerId: ownerId,
+        ownershipPercentage: Number(data.ownershipPercentage) || 100,
+        managementCompany: data.managementCompany?.trim() || companyName || 'Management Co.',
+        address: fullAddress || 'Property Address',
+        streetAddress: streetAddress || 'Street Address',
+        city: city || '',
+        state: state || '',
+        country: country || 'USA',
+        zip: zip || '',
+        yearBuilt: Number(data.yearBuilt) || new Date().getFullYear(),
+        squareFootage: Number(data.squareFootage) || 0,
+        purchasePrice: Number(data.purchasePrice) || 0,
+        currentValue: Number(data.currentValue) || 0,
+        monthlyExpenses: Number(data.monthlyExpenses) || 0,
+        imageUrl: imageUrl,
+        companyId: data.companyId,
+        nycBin: data.nycBin || data.bin || null,
+        paymentProvider,
+        paymentAccountId,
+        encryptedPaymentToken,
+        paymentTokenIv,
+        paymentStatus,
+      },
+    });
+
+    // Auto-create default Building for hierarchy safety
+    try {
+      await prisma.building.create({
+        data: {
+          propertyId: createdProp.id,
+          name: createdProp.name,
+          floors: Number(data.totalFloors || data.totalBuildings || data.floors || 1),
+          unitsCount: Number(data.totalUnits !== undefined && data.totalUnits !== null && Number(data.totalUnits) > 0 ? data.totalUnits : 1),
+        },
+      });
+    } catch (bldErr) {
+      console.error('Failed to auto-create building for property:', bldErr);
+    }
+
+    return createdProp;
+  }
+
+  async bulkImportProperties(propertiesList: any[], companyId?: string) {
+    if (!Array.isArray(propertiesList) || propertiesList.length === 0) {
+      throw new AppError('No properties provided for import.', 400, 'INVALID_INPUT');
+    }
+
+    const resolvedCompanyId = await getManagerCompanyId(undefined, companyId);
+
+    if (resolvedCompanyId) {
+      const company = await prisma.company.findUnique({ where: { id: resolvedCompanyId } });
+      if (company) {
+        const currentCount = await prisma.property.count({
+          where: { companyId: resolvedCompanyId, status: { notIn: ['Inactive', 'Deleted'] } },
+        });
+        const maxLimit = company.maxProperties || 50;
+        if (currentCount + propertiesList.length > maxLimit) {
+          throw new AppError(
+            `Import exceeds your plan limit! Your plan allows up to ${maxLimit} properties. Current: ${currentCount}, Attempting to import: ${propertiesList.length}. Please upgrade your plan or reduce the import list.`,
+            403,
+            'PLAN_LIMIT_EXCEEDED'
+          );
+        }
+      }
+    }
+
+    let companyName = '';
+    if (resolvedCompanyId) {
+      const comp = await prisma.company.findUnique({ where: { id: resolvedCompanyId }, select: { name: true } });
+      if (comp?.name) companyName = comp.name;
+    }
+
+    // Resolve or create default owner
+    let defaultOwner = await prisma.owner.findFirst({
+      where: resolvedCompanyId ? { companyId: resolvedCompanyId } : {},
+    });
+    if (!defaultOwner) {
+      defaultOwner = await prisma.owner.create({
+        data: {
+          name: companyName ? `${companyName} Owner` : 'Portfolio Owner',
+          email: `owner.${Date.now()}@example.com`,
+          phone: '',
+          companyId: resolvedCompanyId,
+        },
+      });
+    }
+
+    const validTypes = ['Apartment', 'Commercial', 'SingleFamily', 'MultiFamily', 'HOA'];
+    const importedProperties: any[] = [];
+
+    // Execute in transaction to ensure all or nothing with complete integrity
+    // Set higher timeout (120s) and maxWait (20s) for bulk processing
+    await prisma.$transaction(
+      async (tx) => {
+        // Pre-fetch all existing owners for the company to avoid repetitive DB lookups
+        const existingOwners = await tx.owner.findMany({
+          where: resolvedCompanyId ? { companyId: resolvedCompanyId } : {},
+        });
+        const ownerMap = new Map<string, string>();
+        for (const o of existingOwners) {
+          if (o.name) {
+            ownerMap.set(o.name.trim().toLowerCase(), o.id);
+          }
+        }
+
+        for (const item of propertiesList) {
+          if (!item.name || !item.name.trim()) continue;
+
+          let typeVal = (item.type || 'Apartment').replace(/\s+/g, '');
+          if (typeVal === 'MUP' || typeVal.includes('Mixed') || typeVal.includes('MUP')) {
+            typeVal = 'Commercial';
+          }
+          if (!validTypes.includes(typeVal)) {
+            typeVal = 'Apartment';
+          }
+
+          // Resolve Owner: check ownerId, or ownerName from map / create new, or default
+          let resolvedOwnerId = item.ownerId;
+          if (!resolvedOwnerId && item.ownerName && typeof item.ownerName === 'string' && item.ownerName.trim()) {
+            const trimmedOwnerName = item.ownerName.trim();
+            const lowerName = trimmedOwnerName.toLowerCase();
+
+            if (ownerMap.has(lowerName)) {
+              resolvedOwnerId = ownerMap.get(lowerName)!;
+            } else {
+              const cleanAlias = lowerName.replace(/[^a-z0-9]/g, '') || 'owner';
+              const newOwner = await tx.owner.create({
+                data: {
+                  name: trimmedOwnerName,
+                  email: `${cleanAlias}.${Date.now()}-${Math.floor(Math.random() * 1000)}@example.com`,
+                  phone: '',
+                  companyId: resolvedCompanyId,
+                },
+              });
+              resolvedOwnerId = newOwner.id;
+              ownerMap.set(lowerName, newOwner.id);
+            }
+          }
+
+          if (!resolvedOwnerId) {
+            resolvedOwnerId = defaultOwner!.id;
+          }
+
+          const street = (item.streetAddress || item.address || item.name || '').trim();
+          const city = (item.city || '').trim();
+          const state = (item.state || '').trim();
+          const zip = (item.zip || '').trim();
+          const country = (item.country || 'USA').trim();
+          const combinedAddress = [street, city, state, zip].filter(Boolean).join(', ') || item.name;
+
+          const unitsCount = Math.max(1, Number(item.totalUnits || item.unitsCount || 1));
+          const occupiedUnits = Math.max(0, Math.min(unitsCount, Number(item.occupiedUnits || 0)));
+          const occupancyRate = item.occupancyRate !== undefined && item.occupancyRate !== null && !isNaN(Number(item.occupancyRate))
+            ? Number(item.occupancyRate)
+            : (unitsCount > 0 ? Math.round((occupiedUnits / unitsCount) * 100) : 0);
+
+          const floors = Math.max(1, Number(item.totalFloors || item.floors || 1));
+          const totalBuildings = Math.max(1, Number(item.totalBuildings || 1));
+
+          const prop = await tx.property.create({
+            data: {
+              name: item.name.trim(),
+              type: typeVal as any,
+              status: item.status || 'Active',
+              ownerId: resolvedOwnerId,
+              ownershipPercentage: Number(item.ownershipPercentage) || 100,
+              managementCompany: item.managementCompany?.trim() || companyName || 'Management Co.',
+              address: combinedAddress,
+              streetAddress: street || item.name,
+              city,
+              state,
+              country,
+              zip,
+              unitsCount,
+              occupiedUnits,
+              occupancyRate,
+              monthlyRevenue: Number(item.monthlyRevenue) || 0,
+              monthlyExpenses: Number(item.monthlyExpenses) || 0,
+              yearBuilt: Number(item.yearBuilt) || new Date().getFullYear(),
+              totalBuildings,
+              squareFootage: Number(item.squareFootage) || 0,
+              purchasePrice: Number(item.purchasePrice) || 0,
+              currentValue: Number(item.currentValue) || 0,
+              companyId: resolvedCompanyId,
+              nycBin: item.nycBin || null,
+            },
+          });
+
+          await tx.building.create({
+            data: {
+              propertyId: prop.id,
+              name: prop.name,
+              floors,
+              unitsCount,
+              occupancyRate,
+            },
+          });
+
+          importedProperties.push(prop);
+        }
+      },
+      {
+        maxWait: 20000, // 20s max wait to acquire connection
+        timeout: 120000, // 120s timeout for large bulk imports
+      }
+    );
+
+    return {
+      count: importedProperties.length,
+      properties: importedProperties,
+    };
+  }
+  async updateProperty(id: string, data: any, file?: any, companyId?: string) {
+    const prop = await prisma.property.findFirst({
+      where: companyId ? { id, companyId } : { id },
+    });
+    if (!prop) throw new AppError('Property not found.', 404, 'NOT_FOUND');
+
+    let ownerId = data.ownerId;
+    if (ownerId) {
+      const owner = await prisma.owner.findFirst({
+        where: companyId ? { id: ownerId, companyId } : { id: ownerId },
+      });
+      if (!owner) {
+        throw new AppError('Owner not found or does not belong to your company.', 404, 'NOT_FOUND');
+      }
+    } else {
+      ownerId = prop.ownerId;
+    }
+
+    let typeVal = data.type;
+    if (typeVal) {
+      typeVal = typeVal.replace(/\s+/g, '');
+      if (typeVal === 'MUP' || typeVal.includes('Mixed') || typeVal.includes('MUP')) {
+        typeVal = 'Commercial';
+      }
+      const validTypes = ['Apartment', 'Commercial', 'SingleFamily', 'MultiFamily', 'HOA'];
+      if (!validTypes.includes(typeVal)) {
+        typeVal = prop.type;
+      }
+    } else {
+      typeVal = prop.type;
+    }
+
+    // Cloudinary upload
+    let imageUrl = data.imageUrl !== undefined ? data.imageUrl : prop.imageUrl;
+    if (file) {
+      try {
+        imageUrl = await new Promise<string>((resolve, reject) => {
+          const uploadStream = cloudinary.uploader.upload_stream(
+            { folder: 'properties' },
+            (error, result) => {
+              if (error) return reject(error);
+              resolve(result?.secure_url || '');
+            }
+          );
+          uploadStream.end(file.buffer);
+        });
+      } catch (err) {
+        console.error('Cloudinary image upload failed:', err);
+      }
+    }
+
+    const binVal = data.nycBin !== undefined ? data.nycBin : (data.bin !== undefined ? data.bin : prop.nycBin);
+
+    let paymentProvider = data.paymentProvider !== undefined ? data.paymentProvider : prop.paymentProvider;
+    let paymentAccountId = data.paymentAccountId !== undefined ? data.paymentAccountId : prop.paymentAccountId;
+    let paymentStatus = data.paymentStatus !== undefined ? data.paymentStatus : (prop.paymentStatus || 'Active');
+    let encryptedPaymentToken = prop.encryptedPaymentToken;
+    let paymentTokenIv = prop.paymentTokenIv;
+
+    if (paymentProvider === 'COMPANY_DEFAULT') {
+      paymentAccountId = null;
+      encryptedPaymentToken = null;
+      paymentTokenIv = null;
+    } else if (data.paymentAuthToken) {
+      try {
+        const encrypted = encrypt(data.paymentAuthToken);
+        encryptedPaymentToken = encrypted.encryptedText;
+        paymentTokenIv = encrypted.iv;
+      } catch (e) {
+        console.error('Failed to encrypt property payment token', e);
+      }
+    }
+
+    const updatedProp = await prisma.property.update({
+      where: { id },
+      data: {
+        name: data.name !== undefined ? data.name : prop.name,
+        type: typeVal as any,
+        status: data.status !== undefined ? data.status : prop.status,
+        ownerId: ownerId,
+        ownershipPercentage: data.ownershipPercentage !== undefined ? Number(data.ownershipPercentage) : prop.ownershipPercentage,
+        managementCompany: data.managementCompany !== undefined ? data.managementCompany : prop.managementCompany,
+        address: data.address !== undefined ? data.address : prop.address,
+        streetAddress: data.streetAddress !== undefined ? data.streetAddress : prop.streetAddress,
+        city: data.city !== undefined ? data.city : prop.city,
+        state: data.state !== undefined ? data.state : prop.state,
+        country: data.country !== undefined ? data.country : prop.country,
+        zip: data.zip !== undefined ? data.zip : prop.zip,
+        yearBuilt: data.yearBuilt !== undefined ? Number(data.yearBuilt) : prop.yearBuilt,
+        squareFootage: data.squareFootage !== undefined ? Number(data.squareFootage) : prop.squareFootage,
+        purchasePrice: data.purchasePrice !== undefined ? Number(data.purchasePrice) : prop.purchasePrice,
+        currentValue: data.currentValue !== undefined ? Number(data.currentValue) : prop.currentValue,
+        monthlyExpenses: data.monthlyExpenses !== undefined ? Number(data.monthlyExpenses) : prop.monthlyExpenses,
+        nycBin: binVal,
+        imageUrl: imageUrl,
+        paymentProvider,
+        paymentAccountId,
+        encryptedPaymentToken,
+        paymentTokenIv,
+        paymentStatus,
+      },
+    });
+
+    // Auto-update associated building details (name, floors & unitsCount)
+    try {
+      const bldData: any = {};
+      if (data.name !== undefined) bldData.name = updatedProp.name;
+      if (data.totalFloors !== undefined || data.totalBuildings !== undefined || data.floors !== undefined) {
+        bldData.floors = Number(data.totalFloors || data.totalBuildings || data.floors || 1);
+      }
+      if (data.totalUnits !== undefined && data.totalUnits !== null) {
+        bldData.unitsCount = Number(data.totalUnits);
+      }
+      if (Object.keys(bldData).length > 0) {
+        await prisma.building.updateMany({
+          where: { propertyId: id },
+          data: bldData,
+        });
+      }
+    } catch (bldErr) {
+      console.error('Failed to auto-update building for property:', bldErr);
+    }
+
+    return updatedProp;
+  }
+
+  async deleteProperty(id: string, companyId?: string, permanent = false) {
+    const where: any = { id };
+    if (companyId) where.companyId = companyId;
+    const prop = await prisma.property.findFirst({ where });
+    if (!prop) {
+      throw new AppError('Property not found', 404, 'NOT_FOUND');
+    }
+
+    if (!permanent) {
+      // Soft-delete: update status to Deleted without removing database records
+      return await prisma.property.update({
+        where: { id },
+        data: { status: 'Deleted' },
+      });
+    }
+
+    // Permanent delete
+    return await prisma.$transaction(async (tx) => {
+      await tx.invoice.deleteMany({ where: { propertyId: id } });
+      await tx.rentPayment.deleteMany({ where: { propertyId: id } });
+      await tx.ownerDocument.deleteMany({ where: { propertyId: id } });
+      await tx.lease.deleteMany({ where: { propertyId: id } });
+      await tx.workOrder.deleteMany({ where: { propertyId: id } });
+      await tx.unit.deleteMany({ where: { propertyId: id } });
+      await tx.building.deleteMany({ where: { propertyId: id } });
+      return await tx.property.delete({ where: { id } });
+    });
+  }
+}
+
+export const propertyService = new PropertyService();

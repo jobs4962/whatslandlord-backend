@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const invoice_controller_1 = require("../controllers/invoice.controller");
+const router = (0, express_1.Router)();
+router.get('/', (req, res, next) => invoice_controller_1.invoiceController.getAll(req, res, next));
+router.post('/', (req, res, next) => invoice_controller_1.invoiceController.create(req, res, next));
+router.put('/:id', (req, res, next) => invoice_controller_1.invoiceController.update(req, res, next));
+router.delete('/:id', (req, res, next) => invoice_controller_1.invoiceController.remove(req, res, next));
+router.post('/:id/ai-reminder', (req, res, next) => invoice_controller_1.invoiceController.generateAiReminder(req, res, next));
+router.post('/:id/send-ai-reminder', (req, res, next) => invoice_controller_1.invoiceController.sendAiReminder(req, res, next));
+exports.default = router;

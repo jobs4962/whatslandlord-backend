@@ -1,0 +1,585 @@
+import { Response, NextFunction } from 'express';
+import prisma from '../config/database';
+import { sendSuccess } from '../utils/apiResponse';
+import { AuthenticatedRequest } from '../middlewares/auth.middleware';
+import { AppError } from '../utils/appError';
+import { v4 as uuidv4 } from 'uuid';
+
+export class RestoreBinController {
+  // Ensure the table exists dynamically
+  private static tableEnsured = false;
+  private static async ensureTable() {
+    if (this.tableEnsured) return;
+    try {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS restore_bin (
+          id VARCHAR(191) PRIMARY KEY,
+          entityType VARCHAR(100) NOT NULL,
+          entityId VARCHAR(191) NOT NULL,
+          title VARCHAR(255) NOT NULL,
+          subtitle VARCHAR(255) NULL,
+          data LONGTEXT NOT NULL,
+          deletedBy VARCHAR(191) NULL,
+          deletedByUserId VARCHAR(191) NULL,
+          deletedByEmail VARCHAR(191) NULL,
+          companyId VARCHAR(191) NULL,
+          createdAt DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          deletedAt DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          INDEX idx_rb_company (companyId),
+          INDEX idx_rb_user (deletedByUserId),
+          INDEX idx_rb_entity (entityType, entityId)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await prisma.$executeRawUnsafe(`
+        ALTER TABLE restore_bin ADD COLUMN deletedByUserId VARCHAR(191) NULL;
+      `).catch(() => {});
+      await prisma.$executeRawUnsafe(`
+        ALTER TABLE restore_bin ADD COLUMN deletedByEmail VARCHAR(191) NULL;
+      `).catch(() => {});
+
+      this.tableEnsured = true;
+    } catch (e) {
+      console.error('Failed to ensure restore_bin table:', e);
+    }
+  }
+
+  async getAll(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      await RestoreBinController.ensureTable();
+      const companyId = req.user?.companyId;
+      const userId = req.user?.userId;
+      const userEmail = req.user?.email;
+      const userRole = (req.user as any)?.roleName;
+      const { type, search } = req.query;
+
+      let query = 'SELECT * FROM restore_bin WHERE 1=1';
+      const params: any[] = [];
+
+      // 1. Strict Company Isolation (Never leak across companies)
+      if (companyId) {
+        query += ' AND companyId = ?';
+        params.push(companyId);
+      } else {
+        query += ' AND companyId IS NULL';
+      }
+
+      // 2. Strict Manager Isolation (Manager A only sees items deleted by Manager A)
+      const isSuperOrAdmin = userRole === 'Super Admin' || userRole === 'Admin' || userRole === 'Company Admin';
+      if (!isSuperOrAdmin && (userId || userEmail)) {
+        query += ' AND (deletedByUserId = ? OR deletedByEmail = ? OR (deletedByUserId IS NULL AND deletedBy = ?))';
+        params.push(userId || '', userEmail || '', userEmail || '');
+      }
+
+      if (type && type !== 'all' && type !== 'All') {
+        query += ' AND entityType = ?';
+        params.push(type);
+      }
+
+      if (search && typeof search === 'string' && search.trim()) {
+        query += ' AND (title LIKE ? OR subtitle LIKE ? OR entityType LIKE ?)';
+        const term = `%${search.trim()}%`;
+        params.push(term, term, term);
+      }
+
+      query += ' ORDER BY deletedAt DESC';
+
+      const items: any[] = await prisma.$queryRawUnsafe(query, ...params);
+      
+      const seen = new Set<string>();
+      const parsed: any[] = [];
+      for (const item of items) {
+        const uniqueKey = `${(item.entityType || '').toLowerCase()}_${item.entityId}`;
+        if (seen.has(uniqueKey)) continue;
+        seen.add(uniqueKey);
+
+        let parsedData = {};
+        try {
+          parsedData = item.data ? JSON.parse(item.data) : {};
+        } catch {
+          parsedData = {};
+        }
+        parsed.push({
+          id: item.id,
+          entityType: item.entityType,
+          entityId: item.entityId,
+          title: item.title,
+          subtitle: item.subtitle,
+          deletedBy: item.deletedBy || 'Property Manager',
+          deletedByUserId: item.deletedByUserId,
+          deletedByEmail: item.deletedByEmail,
+          companyId: item.companyId,
+          deletedAt: item.deletedAt,
+          createdAt: item.createdAt,
+          data: parsedData,
+        });
+      }
+
+      return sendSuccess({ res, data: parsed });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async softDelete(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      await RestoreBinController.ensureTable();
+      const companyId = req.user?.companyId;
+      const { entityType, entityId, title, subtitle, data, deletedBy, deletedAt } = req.body;
+
+      if (!entityType || !entityId) {
+        throw new AppError('entityType and entityId are required', 400);
+      }
+
+      // Remove any pre-existing bin records for this exact entity to prevent duplicates
+      try {
+        await prisma.$executeRawUnsafe(
+          'DELETE FROM restore_bin WHERE entityType = ? AND entityId = ?',
+          entityType,
+          entityId
+        );
+      } catch (e) {
+        console.warn('Failed to clean previous restore_bin duplicate:', e);
+      }
+
+      const id = uuidv4();
+      const userObj = req.user as any;
+      const userId = req.user?.userId || null;
+      const userEmail = req.user?.email || null;
+      const userIdentifier =
+        deletedBy ||
+        (userObj ? `${userObj.firstName || ''} ${userObj.lastName || ''}`.trim() : '') ||
+        userEmail ||
+        'Property Manager';
+      const serializedData = typeof data === 'string' ? data : JSON.stringify(data || {});
+      const now = new Date();
+      const itemDeletedAt = deletedAt ? new Date(deletedAt) : now;
+
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO restore_bin (id, entityType, entityId, title, subtitle, data, deletedBy, deletedByUserId, deletedByEmail, companyId, createdAt, deletedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id,
+        entityType,
+        entityId,
+        title || `${entityType} #${entityId.substring(0, 8)}`,
+        subtitle || '',
+        serializedData,
+        userIdentifier,
+        userId,
+        userEmail,
+        companyId || null,
+        now,
+        itemDeletedAt
+      );
+
+      // Perform soft delete on the source entity if applicable
+      try {
+        if (entityType === 'Property') {
+          await prisma.property.update({
+            where: { id: entityId },
+            data: { status: 'Deleted' },
+          }).catch(() => {});
+        } else if (entityType === 'Unit') {
+          await prisma.unit.update({
+            where: { id: entityId },
+            data: { status: 'UnderMaintenance' as any },
+          }).catch(() => {});
+        } else if (entityType === 'Tenant') {
+          await prisma.tenant.update({
+            where: { id: entityId },
+            data: { status: 'Inactive' as any },
+          }).catch(() => {});
+        } else if (entityType === 'Lease') {
+          await prisma.lease.update({
+            where: { id: entityId },
+            data: { status: 'Terminated' as any },
+          }).catch(() => {});
+        }
+      } catch (e) {
+        console.warn('Soft-delete status update on source entity ignored:', e);
+      }
+
+      return sendSuccess({
+        res,
+        statusCode: 201,
+        message: 'Item moved to Restore Bin',
+        data: {
+          id,
+          entityType,
+          entityId,
+          title: title || `${entityType} #${entityId.substring(0, 8)}`,
+          subtitle: subtitle || '',
+          deletedBy: userIdentifier,
+          companyId,
+          deletedAt: now,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async restore(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      await RestoreBinController.ensureTable();
+      const id = req.params.id as string;
+      const companyId = req.user?.companyId;
+
+      const items: any[] = await prisma.$queryRawUnsafe(
+        `SELECT * FROM restore_bin WHERE id = ? ${companyId ? 'AND companyId = ?' : 'AND companyId IS NULL'} LIMIT 1`,
+        ...(companyId ? [id, companyId] : [id])
+      );
+
+      if (!items || items.length === 0) {
+        throw new AppError('Item not found in Restore Bin', 404);
+      }
+
+      const item = items[0];
+      let entityData: any = {};
+      try {
+        entityData = JSON.parse(item.data);
+      } catch {
+        entityData = {};
+      }
+
+      // Restore based on entityType
+      const { entityType, entityId } = item;
+
+      if (entityType === 'Property') {
+        const existing = await prisma.property.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.property.update({
+            where: { id: entityId },
+            data: { status: entityData.status && entityData.status !== 'Deleted' ? entityData.status : 'Active' },
+          });
+        } else {
+          await (prisma.property.create as any)({
+            data: {
+              id: entityId,
+              name: entityData.name || item.title || 'Restored Property',
+              address: entityData.address || entityData.streetAddress || item.subtitle || '',
+              type: entityData.type || 'Apartment',
+              status: 'Active',
+              ownerId: entityData.ownerId || null,
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored property in DB:', err);
+          });
+        }
+      } else if (entityType === 'Unit') {
+        const existing = await prisma.unit.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.unit.update({
+            where: { id: entityId },
+            data: { status: (entityData.status && entityData.status !== 'Inactive' ? entityData.status : 'Vacant') as any },
+          });
+        } else {
+          await (prisma.unit.create as any)({
+            data: {
+              id: entityId,
+              unitNumber: entityData.unitNumber || item.title?.replace('Unit ', '') || '101',
+              propertyId: entityData.propertyId || null,
+              status: 'Vacant',
+              rentAmount: entityData.rentAmount || 0,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored unit in DB:', err);
+          });
+        }
+      } else if (entityType === 'Tenant') {
+        const existing = await prisma.tenant.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.tenant.update({
+            where: { id: entityId },
+            data: { status: (entityData.status && entityData.status !== 'Inactive' ? entityData.status : 'Active') as any },
+          });
+        } else {
+          const resolvedFirstName = entityData.firstName || item.title?.split(' ')[0] || 'Tenant';
+          const resolvedLastName = entityData.lastName || item.title?.split(' ').slice(1).join(' ') || 'User';
+          const resolvedEmail = entityData.email || `${entityId.substring(0, 8)}@example.com`;
+          await (prisma.tenant.create as any)({
+            data: {
+              id: entityId,
+              firstName: resolvedFirstName,
+              lastName: resolvedLastName,
+              email: resolvedEmail,
+              phone: entityData.phone || '',
+              unitId: entityData.unitId || null,
+              status: 'Active',
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored tenant in DB:', err);
+          });
+        }
+      } else if (entityType === 'Lease') {
+        const existing = await prisma.lease.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.lease.update({
+            where: { id: entityId },
+            data: { status: (entityData.status && entityData.status !== 'Terminated' ? entityData.status : 'Active') as any },
+          });
+        } else {
+          await (prisma.lease.create as any)({
+            data: {
+              id: entityId,
+              tenantId: entityData.tenantId,
+              propertyId: entityData.propertyId,
+              unitId: entityData.unitId,
+              startDate: entityData.startDate ? new Date(entityData.startDate) : new Date(),
+              endDate: entityData.endDate ? new Date(entityData.endDate) : new Date(Date.now() + 365*24*60*60*1000),
+              rentAmount: entityData.rentAmount || 0,
+              status: 'Active',
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored lease in DB:', err);
+          });
+        }
+      } else if (entityType === 'Owner') {
+        const existing = await prisma.owner.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (!existing) {
+          const resolvedName = entityData.name || `${entityData.firstName || ''} ${entityData.lastName || ''}`.trim() || item.title || 'Restored Owner';
+          const resolvedEmail = entityData.email || `${entityId.substring(0, 8)}@example.com`;
+          await prisma.owner.create({
+            data: {
+              id: entityId,
+              name: resolvedName,
+              email: resolvedEmail,
+              phone: entityData.phone || '',
+              payoutMethod: entityData.payoutMethod || 'ACH/Direct Deposit',
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err) => {
+            console.error('Failed to recreate restored owner in DB:', err);
+          });
+        }
+      } else if (entityType === 'ServiceRequest') {
+        const existing = await prisma.serviceRequest.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.serviceRequest.update({
+            where: { id: entityId },
+            data: { status: 'New' as any },
+          }).catch(() => {});
+        } else {
+          await (prisma.serviceRequest.create as any)({
+            data: {
+              id: entityId,
+              title: entityData.title || item.title || 'Service Request',
+              description: entityData.description || item.subtitle || 'Restored service request',
+              propertyId: entityData.propertyId || '',
+              propertyName: entityData.propertyName || 'Property',
+              unitNumber: entityData.unitNumber || '',
+              tenantId: entityData.tenantId || null,
+              tenantName: entityData.tenantName || 'Tenant',
+              priority: entityData.priority || 'Normal',
+              status: 'New',
+              category: entityData.category || 'General',
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored service request in DB:', err);
+          });
+        }
+      } else if (entityType === 'WorkOrder') {
+        const existing = await prisma.workOrder.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.workOrder.update({
+            where: { id: entityId },
+            data: { status: 'Open' as any },
+          }).catch(() => {});
+        } else {
+          await (prisma.workOrder.create as any)({
+            data: {
+              id: entityId,
+              propertyId: entityData.propertyId || '',
+              title: entityData.title || item.title || 'Work Order',
+              description: entityData.description || item.subtitle || 'Restored work order',
+              vendorId: entityData.vendorId || null,
+              priority: (entityData.priority || 'Normal') as any,
+              status: 'Open' as any,
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored work order in DB:', err);
+          });
+        }
+      } else if (entityType === 'Invoice') {
+        const existing = await prisma.invoice.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.invoice.update({
+            where: { id: entityId },
+            data: { status: 'Draft' as any },
+          }).catch(() => {});
+        } else {
+          await (prisma.invoice.create as any)({
+            data: {
+              id: entityId,
+              tenantId: entityData.tenantId || null,
+              tenantName: entityData.tenantName || 'Tenant',
+              propertyId: entityData.propertyId || '',
+              propertyName: entityData.propertyName || 'Property',
+              unitNumber: entityData.unitNumber || '',
+              dueDate: entityData.dueDate ? String(entityData.dueDate) : new Date().toISOString().split('T')[0],
+              amount: Number(entityData.amount) || 0,
+              paidAmount: Number(entityData.paidAmount) || 0,
+              balance: Number(entityData.balance) || Number(entityData.amount) || 0,
+              status: entityData.status || 'Draft',
+              lineItems: typeof entityData.lineItems === 'string' ? entityData.lineItems : JSON.stringify(entityData.lineItems || []),
+              notes: entityData.notes || null,
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored invoice in DB:', err);
+          });
+        }
+      } else if (entityType === 'Vendor') {
+        const existing = await prisma.vendor.findUnique({ where: { id: entityId } }).catch(() => null);
+        if (existing) {
+          await prisma.vendor.update({
+            where: { id: entityId },
+            data: { companyName: entityData.companyName || entityData.name || item.title || 'Vendor' },
+          }).catch(() => {});
+        } else {
+          await (prisma.vendor.create as any)({
+            data: {
+              id: entityId,
+              companyName: entityData.companyName || entityData.name || item.title || 'Vendor',
+              contactName: entityData.contactName || '',
+              email: entityData.email || `${entityId.substring(0, 8)}@vendor.com`,
+              phone: entityData.phone || '',
+              serviceType: entityData.serviceType || 'General',
+              rating: Number(entityData.rating) || 5,
+              companyId: item.companyId || companyId || null,
+            },
+          }).catch((err: any) => {
+            console.error('Failed to recreate restored vendor in DB:', err);
+          });
+        }
+      }
+
+      // Remove from restore_bin
+      await prisma.$executeRawUnsafe(`DELETE FROM restore_bin WHERE id = ? OR entityId = ?`, id, entityId);
+
+      return sendSuccess({
+        res,
+        message: 'Item restored successfully',
+        data: { id, entityType, entityId, restored: true },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async permanentDelete(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      await RestoreBinController.ensureTable();
+      const id = req.params.id as string;
+      const companyId = req.user?.companyId;
+      const userId = req.user?.userId;
+      const userEmail = req.user?.email;
+      const userRole = (req.user as any)?.roleName;
+
+      let checkQuery = 'SELECT * FROM restore_bin WHERE id = ?';
+      const checkParams: any[] = [id];
+
+      if (companyId) {
+        checkQuery += ' AND companyId = ?';
+        checkParams.push(companyId);
+      } else {
+        checkQuery += ' AND companyId IS NULL';
+      }
+
+      const isSuperOrAdmin = userRole === 'Super Admin' || userRole === 'Admin' || userRole === 'Company Admin';
+      if (!isSuperOrAdmin && (userId || userEmail)) {
+        checkQuery += ' AND (deletedByUserId = ? OR deletedByEmail = ? OR deletedBy = ?)';
+        checkParams.push(userId || '', userEmail || '', userEmail || '');
+      }
+
+      const items: any[] = await prisma.$queryRawUnsafe(checkQuery, ...checkParams);
+
+      if (!items || items.length === 0) {
+        throw new AppError('Item not found in Restore Bin', 404);
+      }
+
+      const item = items[0];
+      const { entityType, entityId } = item;
+
+      // Permanently remove source entity from DB if it exists
+      try {
+        if (entityType === 'Property') {
+          await prisma.unit.deleteMany({ where: { propertyId: entityId } }).catch(() => {});
+          await prisma.building.deleteMany({ where: { propertyId: entityId } }).catch(() => {});
+          await prisma.property.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'Unit') {
+          await prisma.unit.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'Tenant') {
+          await prisma.tenant.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'Lease') {
+          await prisma.lease.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'WorkOrder') {
+          await prisma.workOrder.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'ServiceRequest') {
+          await prisma.serviceRequest.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'Invoice') {
+          await prisma.invoice.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'Vendor') {
+          await prisma.vendor.delete({ where: { id: entityId } }).catch(() => {});
+        } else if (entityType === 'Owner') {
+          await prisma.owner.delete({ where: { id: entityId } }).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('Permanent delete from DB table encountered error, continuing:', err);
+      }
+
+      // Remove from restore_bin
+      await prisma.$executeRawUnsafe(`DELETE FROM restore_bin WHERE id = ?`, id);
+
+      return sendSuccess({
+        res,
+        message: 'Item permanently deleted',
+        data: { id, entityType, entityId, permanentlyDeleted: true },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async emptyBin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    try {
+      await RestoreBinController.ensureTable();
+      const companyId = req.user?.companyId;
+      const userId = req.user?.userId;
+      const userEmail = req.user?.email;
+      const userRole = (req.user as any)?.roleName;
+
+      let query = 'DELETE FROM restore_bin WHERE 1=1';
+      const params: any[] = [];
+
+      if (companyId) {
+        query += ' AND companyId = ?';
+        params.push(companyId);
+      } else {
+        query += ' AND companyId IS NULL';
+      }
+
+      const isSuperOrAdmin = userRole === 'Super Admin' || userRole === 'Admin' || userRole === 'Company Admin';
+      if (!isSuperOrAdmin && (userId || userEmail)) {
+        query += ' AND (deletedByUserId = ? OR deletedByEmail = ? OR deletedBy = ?)';
+        params.push(userId || '', userEmail || '', userEmail || '');
+      }
+
+      await prisma.$executeRawUnsafe(query, ...params);
+
+      return sendSuccess({
+        res,
+        message: 'Restore Bin emptied permanently',
+        data: { success: true },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+}
+
+export const restoreBinController = new RestoreBinController();

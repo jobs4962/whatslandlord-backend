@@ -1,0 +1,259 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.secondaryController = exports.SecondaryController = void 0;
+const secondary_service_1 = require("../services/secondary.service");
+const apiResponse_1 = require("../utils/apiResponse");
+const tenantContext_1 = require("../utils/tenantContext");
+class SecondaryController {
+    // Announcements
+    async getAnnouncements(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const list = await secondary_service_1.secondaryService.getAnnouncements(companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, data: list });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async createAnnouncement(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const item = await secondary_service_1.secondaryService.createAnnouncement(req.body, companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, statusCode: 201, data: item });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    // Insurance
+    async getInsurancePolicies(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const list = await secondary_service_1.secondaryService.getInsurancePolicies(companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, data: list });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async createInsurancePolicy(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const item = await secondary_service_1.secondaryService.createInsurancePolicy(req.body, companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, statusCode: 201, data: item });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    // Promotions
+    async getPromotions(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const list = await secondary_service_1.secondaryService.getPromotions(companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, data: list });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async createPromotion(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const item = await secondary_service_1.secondaryService.createPromotion(req.body, companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, statusCode: 201, data: item });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    // Notifications
+    async getNotifications(req, res, next) {
+        try {
+            const store = tenantContext_1.tenantContext.getStore();
+            const companyId = store?.companyId || req.user?.companyId;
+            const tokenRole = store?.role || req.user?.roleName || req.user?.role;
+            const role = tokenRole || req.query.role;
+            const userContext = {
+                id: store?.userId || req.user?.userId || req.user?.id,
+                userId: store?.userId || req.user?.userId || req.user?.id,
+                email: req.user?.email,
+                role: tokenRole,
+                tenantId: store?.tenantId || req.user?.tenantId,
+                ownerId: store?.ownerId || req.user?.ownerId,
+                staffId: store?.staffId || req.user?.staffId
+            };
+            const list = await secondary_service_1.secondaryService.getNotifications(companyId, role, userContext);
+            return (0, apiResponse_1.sendSuccess)({ res, data: list });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async markNotificationRead(req, res, next) {
+        try {
+            const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+            const item = await secondary_service_1.secondaryService.markNotificationRead(id);
+            return (0, apiResponse_1.sendSuccess)({ res, data: item });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async markAllNotificationsRead(req, res, next) {
+        try {
+            const store = tenantContext_1.tenantContext.getStore();
+            const companyId = store?.companyId || req.user?.companyId;
+            const tokenRole = store?.role || req.user?.roleName || req.user?.role;
+            const role = tokenRole || req.query.role;
+            const userContext = {
+                id: store?.userId || req.user?.userId || req.user?.id,
+                userId: store?.userId || req.user?.userId || req.user?.id,
+                email: req.user?.email,
+                role: tokenRole,
+                tenantId: store?.tenantId || req.user?.tenantId,
+                ownerId: store?.ownerId || req.user?.ownerId,
+                staffId: store?.staffId || req.user?.staffId
+            };
+            const result = await secondary_service_1.secondaryService.markAllNotificationsRead(companyId, role, userContext);
+            return (0, apiResponse_1.sendSuccess)({ res, data: result });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async clearNotifications(req, res, next) {
+        try {
+            const store = tenantContext_1.tenantContext.getStore();
+            const companyId = store?.companyId || req.user?.companyId;
+            const tokenRole = store?.role || req.user?.roleName || req.user?.role;
+            const role = tokenRole || req.query.role;
+            const userContext = {
+                id: store?.userId || req.user?.userId || req.user?.id,
+                userId: store?.userId || req.user?.userId || req.user?.id,
+                email: req.user?.email,
+                role: tokenRole,
+                tenantId: store?.tenantId || req.user?.tenantId,
+                ownerId: store?.ownerId || req.user?.ownerId,
+                staffId: store?.staffId || req.user?.staffId
+            };
+            const result = await secondary_service_1.secondaryService.clearNotifications(companyId, role, userContext);
+            return (0, apiResponse_1.sendSuccess)({ res, data: result });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async deleteNotification(req, res, next) {
+        try {
+            const id = req.params.id;
+            const result = await secondary_service_1.secondaryService.deleteNotification(id);
+            return (0, apiResponse_1.sendSuccess)({ res, data: result, message: 'Notification deleted successfully' });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    // Documents
+    async getDocuments(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const list = await secondary_service_1.secondaryService.getDocuments(companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, data: list });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async createDocument(req, res, next) {
+        try {
+            const companyId = req.user?.companyId;
+            const item = await secondary_service_1.secondaryService.createDocument(req.body, companyId);
+            return (0, apiResponse_1.sendSuccess)({ res, statusCode: 201, data: item });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    // AI Assistant & Conversations
+    async processAiChat(req, res, next) {
+        try {
+            const { prompt, chatId } = req.body;
+            const result = await secondary_service_1.secondaryService.processAiChat(prompt || 'Show summary', req.user, chatId);
+            return (0, apiResponse_1.sendSuccess)({ res, data: result });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async getAiConversations(req, res, next) {
+        try {
+            const conversations = await secondary_service_1.secondaryService.getAiConversations(req.user);
+            return (0, apiResponse_1.sendSuccess)({ res, data: conversations });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async getAiConversationMessages(req, res, next) {
+        try {
+            const chatId = String(req.params.chatId);
+            const messages = await secondary_service_1.secondaryService.getAiConversationMessages(chatId, req.user);
+            return (0, apiResponse_1.sendSuccess)({ res, data: messages });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async createAiConversation(req, res, next) {
+        try {
+            const { name, module } = req.body || {};
+            const conv = await secondary_service_1.secondaryService.createAiConversation(name, module, req.user);
+            return (0, apiResponse_1.sendSuccess)({ res, data: conv });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async deleteAiConversation(req, res, next) {
+        try {
+            const chatId = String(req.params.chatId);
+            await secondary_service_1.secondaryService.deleteAiConversation(chatId, req.user);
+            return (0, apiResponse_1.sendSuccess)({ res, message: 'Conversation deleted successfully' });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    // 1-to-1 Direct Messaging (Zero Leakage)
+    async getDirectMessages(req, res, next) {
+        try {
+            const messages = await secondary_service_1.secondaryService.getDirectMessages(req.user);
+            return (0, apiResponse_1.sendSuccess)({ res, data: messages });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async sendDirectMessage(req, res, next) {
+        try {
+            const newMsg = await secondary_service_1.secondaryService.sendDirectMessage(req.user, req.body);
+            return (0, apiResponse_1.sendSuccess)({ res, statusCode: 201, data: newMsg });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+    async getDirectContacts(req, res, next) {
+        try {
+            const contacts = await secondary_service_1.secondaryService.getDirectContacts(req.user);
+            return (0, apiResponse_1.sendSuccess)({ res, data: contacts });
+        }
+        catch (error) {
+            next(error);
+        }
+    }
+}
+exports.SecondaryController = SecondaryController;
+exports.secondaryController = new SecondaryController();
