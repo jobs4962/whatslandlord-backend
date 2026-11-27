@@ -420,6 +420,7 @@ class SuperAdminService {
             'Reports',
             'Communication',
             'AI Assistant',
+            'Restore Bin',
             'Company Settings',
         ];
         const fullPermissions = standardModules.map((m) => ({
@@ -553,6 +554,7 @@ class SuperAdminService {
             'Reports',
             'Communication',
             'AI Assistant',
+            'Restore Bin',
             'Company Settings',
         ];
         // 2. Fetch or create the corresponding Role record from DB

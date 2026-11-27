@@ -40,8 +40,8 @@ exports.portalController = exports.PortalController = void 0;
 const database_1 = __importDefault(require("../config/database"));
 const apiResponse_1 = require("../utils/apiResponse");
 const cloudinary_1 = __importDefault(require("../config/cloudinary"));
-const billingAutomation_service_1 = require("../services/billingAutomation.service");
 const notification_helper_1 = require("../services/notification.helper");
+const billingAutomation_service_1 = require("../services/billingAutomation.service");
 class PortalController {
     // --- Helper to get tenant for logged in user ---
     async getTenantForUser(req) {
@@ -189,23 +189,55 @@ class PortalController {
                     },
                 });
             }
-            // Automatically run auto-billing catch-up first so the tenant's metrics reflect auto invoices!
-            await (0, billingAutomation_service_1.generateAutoInvoices)();
             const activeLease = tenant.leases && tenant.leases.length > 0 ? tenant.leases[0] : null;
             const leaseExpiration = activeLease?.endDate
                 ? new Date(activeLease.endDate).toISOString().split('T')[0]
                 : 'N/A';
-            // Find all unpaid invoices
-            const unpaidInvoices = await database_1.default.invoice.findMany({
+            // Fetch tenant's payments to dynamically reconcile invoice balances
+            const allTenantPayments = await database_1.default.rentPayment.findMany({
+                where: {
+                    OR: [
+                        { tenantId: tenant.id },
+                        ...(tenant.unitId ? [{ unitId: tenant.unitId }] : []),
+                    ],
+                },
+            });
+            // Filter to successful/cleared payments
+            const tenantPayments = allTenantPayments.filter((p) => {
+                const s = String(p.status || '').toLowerCase();
+                return s === 'paid' || s === 'partiallypaid' || s === 'cleared';
+            });
+            const allTenantInvoices = await database_1.default.invoice.findMany({
                 where: {
                     tenantId: tenant.id,
-                    status: { in: ['Sent', 'Overdue', 'Partially Paid', 'Unpaid', 'Pending'] }
+                    status: { notIn: ['Draft', 'Void', 'Cancelled'] }
                 },
                 orderBy: {
                     dueDate: 'asc'
                 }
             });
-            const outstandingBalance = unpaidInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
+            // Reconcile each invoice with matched payments by invoiceId or billing month
+            const reconciledInvoices = allTenantInvoices.map((inv) => {
+                const invMonth = String(inv.dueDate || '').slice(0, 7);
+                const matchedPays = tenantPayments.filter((p) => {
+                    if (p.invoiceId && p.invoiceId === inv.id)
+                        return true;
+                    const pMonth = String(p.dueDate || p.paidDate || '').slice(0, 7);
+                    return pMonth && pMonth === invMonth;
+                });
+                const paidFromPayments = matchedPays.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+                const effectivePaid = Math.max(Number(inv.paidAmount || 0), paidFromPayments);
+                const invAmount = Number(inv.amount || 0);
+                const effectiveBal = Math.max(0, Math.round((invAmount - effectivePaid) * 100) / 100);
+                return {
+                    ...inv,
+                    paidAmount: effectivePaid,
+                    balance: effectiveBal,
+                    isUnpaid: effectiveBal > 0,
+                };
+            });
+            const unpaidInvoices = reconciledInvoices.filter((inv) => inv.isUnpaid);
+            const outstandingBalance = Math.round(unpaidInvoices.reduce((sum, inv) => sum + inv.balance, 0) * 100) / 100;
             // The oldest unpaid invoice is the next one due
             const oldestUnpaid = unpaidInvoices[0];
             const currentRent = oldestUnpaid ? oldestUnpaid.balance : 0;
@@ -2080,8 +2112,6 @@ class PortalController {
     // --- Invoices ---
     async getInvoices(req, res, next) {
         try {
-            await (0, billingAutomation_service_1.generateAutoInvoices)();
-            await (0, billingAutomation_service_1.generateAutoLateFees)();
             const companyId = req.user?.companyId;
             let whereClause = companyId ? { companyId } : {};
             if ((req.user?.role === 'Tenant' || req.user?.roleName === 'Tenant') && req.user?.email) {
@@ -2174,7 +2204,7 @@ class PortalController {
                     amount: parsedAmount,
                     balance: isPaid ? 0 : (req.body.balance !== undefined ? parseFloat(req.body.balance) : parsedAmount),
                     paidAmount: isPaid ? parsedAmount : (req.body.paidAmount !== undefined ? parseFloat(req.body.paidAmount) : 0),
-                    dueDate: String(dueDate || new Date().toISOString().split('T')[0]),
+                    dueDate: String(dueDate || (0, billingAutomation_service_1.getNewYorkDateStr)()),
                     status: status || (isPaid ? 'Paid' : 'Sent'),
                     lineItems: JSON.stringify(req.body.lineItems || []),
                 },

@@ -7,6 +7,7 @@ exports.unitController = exports.UnitController = void 0;
 const database_1 = __importDefault(require("../config/database"));
 const apiResponse_1 = require("../utils/apiResponse");
 const appError_1 = require("../utils/appError");
+const billingAutomation_service_1 = require("../services/billingAutomation.service");
 class UnitController {
     async getAll(req, res, next) {
         try {
@@ -509,24 +510,41 @@ class UnitController {
                         const getPastMonthsList = (dateStr) => {
                             if (!dateStr)
                                 return [];
-                            const start = new Date(dateStr);
-                            if (isNaN(start.getTime()))
+                            const start = (0, billingAutomation_service_1.parseDateUTC)(dateStr);
+                            if (!start || isNaN(start.getTime()))
                                 return [];
-                            const now = new Date();
-                            let curYear = start.getFullYear();
-                            let curMonth = start.getMonth();
-                            const endYear = now.getFullYear();
-                            const endMonth = now.getMonth();
+                            const nowNY = (0, billingAutomation_service_1.getNewYorkDate)();
+                            let curYear = start.getUTCFullYear();
+                            let curMonth = start.getUTCMonth();
+                            const startDay = start.getUTCDate();
+                            const endYear = nowNY.getUTCFullYear();
+                            const endMonth = nowNY.getUTCMonth();
                             if (curYear > endYear || (curYear === endYear && curMonth > endMonth)) {
                                 return [];
                             }
                             const months = [];
+                            let isFirst = true;
                             while (curYear < endYear || (curYear === endYear && curMonth <= endMonth)) {
-                                const d = new Date(curYear, curMonth, 1);
+                                const d = new Date(Date.UTC(curYear, curMonth, 1));
                                 const id = `${curYear}-${String(curMonth + 1).padStart(2, '0')}`;
-                                const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-                                const dueDate = `${curYear}-${String(curMonth + 1).padStart(2, '0')}-01`;
-                                months.push({ id, label, dueDate, monthDate: d });
+                                const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+                                const dueDate = isFirst
+                                    ? `${id}-${String(startDay).padStart(2, '0')}`
+                                    : `${id}-01`;
+                                const proration = isFirst
+                                    ? (0, billingAutomation_service_1.calculateProratedFirstMonthRent)(rentAmount, start)
+                                    : { amount: rentAmount, isProrated: false, daysInMonth: 0, remainingDays: 0 };
+                                months.push({
+                                    id,
+                                    label,
+                                    dueDate,
+                                    monthDate: isFirst ? start : d,
+                                    monthRent: proration.amount,
+                                    isProrated: proration.isProrated,
+                                    daysInMonth: proration.daysInMonth,
+                                    remainingDays: proration.remainingDays,
+                                });
+                                isFirst = false;
                                 curMonth++;
                                 if (curMonth > 11) {
                                     curMonth = 0;
@@ -543,14 +561,19 @@ class UnitController {
                             outstandingBalance = 0;
                         }
                         if (pastMonths.length > 0) {
-                            const totalPastRent = pastMonths.length * rentAmount;
+                            const totalPastRent = pastMonths.reduce((sum, m) => sum + m.monthRent, 0);
                             if (pastRentStatus.includes('unpaid')) {
                                 // All months unpaid / overdue
                                 for (const m of pastMonths) {
                                     const lateFee = includeLateFee ? 50 : 0;
-                                    const totalAmt = rentAmount + lateFee;
+                                    const totalAmt = m.monthRent + lateFee;
                                     const lineItems = [
-                                        { description: `Monthly Rent Charge - ${m.label}`, amount: rentAmount },
+                                        {
+                                            description: m.isProrated
+                                                ? `Prorated Rent Charge - ${m.label} (${m.remainingDays}/${m.daysInMonth} days)`
+                                                : `Monthly Rent Charge - ${m.label}`,
+                                            amount: m.monthRent,
+                                        },
                                     ];
                                     if (lateFee > 0) {
                                         lineItems.push({
@@ -584,7 +607,12 @@ class UnitController {
                                 // All months fully paid with receipts
                                 for (const m of pastMonths) {
                                     const lineItems = [
-                                        { description: `Monthly Rent Charge - ${m.label}`, amount: rentAmount },
+                                        {
+                                            description: m.isProrated
+                                                ? `Prorated Rent Charge - ${m.label} (${m.remainingDays}/${m.daysInMonth} days)`
+                                                : `Monthly Rent Charge - ${m.label}`,
+                                            amount: m.monthRent,
+                                        },
                                     ];
                                     await tx.invoice.create({
                                         data: {
@@ -594,8 +622,8 @@ class UnitController {
                                             propertyName: targetProp.name,
                                             unitNumber: unitNumStr,
                                             dueDate: m.dueDate,
-                                            amount: rentAmount,
-                                            paidAmount: rentAmount,
+                                            amount: m.monthRent,
+                                            paidAmount: m.monthRent,
                                             balance: 0,
                                             status: 'Paid',
                                             lineItems: JSON.stringify(lineItems),
@@ -608,7 +636,7 @@ class UnitController {
                                             propertyId: targetProp.id,
                                             unitId: createdUnit.id,
                                             leaseId: createdLease.id,
-                                            amount: rentAmount,
+                                            amount: m.monthRent,
                                             dueDate: m.monthDate,
                                             paidDate: m.monthDate,
                                             status: 'Paid',
@@ -627,11 +655,17 @@ class UnitController {
                                 for (let i = 0; i < pastMonths.length; i++) {
                                     const m = pastMonths[i];
                                     const isLastMonth = i === pastMonths.length - 1;
-                                    if (remainingPaidPool >= rentAmount) {
+                                    const monthBaseRent = m.monthRent;
+                                    if (remainingPaidPool >= monthBaseRent) {
                                         // Fully paid month
-                                        remainingPaidPool -= rentAmount;
+                                        remainingPaidPool -= monthBaseRent;
                                         const lineItems = [
-                                            { description: `Monthly Rent Charge - ${m.label}`, amount: rentAmount },
+                                            {
+                                                description: m.isProrated
+                                                    ? `Prorated Rent Charge - ${m.label} (${m.remainingDays}/${m.daysInMonth} days)`
+                                                    : `Monthly Rent Charge - ${m.label}`,
+                                                amount: monthBaseRent,
+                                            },
                                         ];
                                         await tx.invoice.create({
                                             data: {
@@ -641,8 +675,8 @@ class UnitController {
                                                 propertyName: targetProp.name,
                                                 unitNumber: unitNumStr,
                                                 dueDate: m.dueDate,
-                                                amount: rentAmount,
-                                                paidAmount: rentAmount,
+                                                amount: monthBaseRent,
+                                                paidAmount: monthBaseRent,
                                                 balance: 0,
                                                 status: 'Paid',
                                                 lineItems: JSON.stringify(lineItems),
@@ -655,7 +689,7 @@ class UnitController {
                                                 propertyId: targetProp.id,
                                                 unitId: createdUnit.id,
                                                 leaseId: createdLease.id,
-                                                amount: rentAmount,
+                                                amount: monthBaseRent,
                                                 dueDate: m.monthDate,
                                                 paidDate: m.monthDate,
                                                 status: 'Paid',
@@ -671,13 +705,18 @@ class UnitController {
                                         const monthPaid = remainingPaidPool;
                                         remainingPaidPool = 0;
                                         const lateFee = includeLateFee ? 50 : 0;
-                                        let totalAmt = rentAmount + lateFee;
+                                        let totalAmt = monthBaseRent + lateFee;
                                         if (isLastMonth && excessDebt > 0) {
                                             totalAmt += excessDebt;
                                         }
                                         const monthBal = totalAmt - monthPaid;
                                         const lineItems = [
-                                            { description: `Monthly Rent Charge - ${m.label}`, amount: rentAmount },
+                                            {
+                                                description: m.isProrated
+                                                    ? `Prorated Rent Charge - ${m.label} (${m.remainingDays}/${m.daysInMonth} days)`
+                                                    : `Monthly Rent Charge - ${m.label}`,
+                                                amount: monthBaseRent,
+                                            },
                                         ];
                                         if (lateFee > 0) {
                                             lineItems.push({
@@ -727,12 +766,17 @@ class UnitController {
                                     else {
                                         // Fully overdue month
                                         const lateFee = includeLateFee ? 50 : 0;
-                                        let totalAmt = rentAmount + lateFee;
+                                        let totalAmt = monthBaseRent + lateFee;
                                         if (isLastMonth && excessDebt > 0) {
                                             totalAmt += excessDebt;
                                         }
                                         const lineItems = [
-                                            { description: `Monthly Rent Charge - ${m.label}`, amount: rentAmount },
+                                            {
+                                                description: m.isProrated
+                                                    ? `Prorated Rent Charge - ${m.label} (${m.remainingDays}/${m.daysInMonth} days)`
+                                                    : `Monthly Rent Charge - ${m.label}`,
+                                                amount: monthBaseRent,
+                                            },
                                         ];
                                         if (lateFee > 0) {
                                             lineItems.push({

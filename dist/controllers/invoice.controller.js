@@ -9,6 +9,7 @@ const apiResponse_1 = require("../utils/apiResponse");
 const env_1 = require("../config/env");
 const notification_helper_1 = require("../services/notification.helper");
 const email_service_1 = require("../services/email.service");
+const billingAutomation_service_1 = require("../services/billingAutomation.service");
 class InvoiceController {
     async getAll(req, res, next) {
         try {
@@ -170,11 +171,11 @@ class InvoiceController {
                     propertyId: propertyId || 'default',
                     propertyName: propertyName || 'Unknown Property',
                     unitNumber: unitNumber || '',
-                    dueDate: typeof dueDate === 'string' ? dueDate : (isNaN(parsedDueDate.getTime()) ? new Date().toISOString().split('T')[0] : parsedDueDate.toISOString().split('T')[0]),
+                    dueDate: typeof dueDate === 'string' ? dueDate.split('T')[0] : (isNaN(parsedDueDate.getTime()) ? (0, billingAutomation_service_1.getNewYorkDateStr)() : (0, billingAutomation_service_1.getNewYorkDateStr)(parsedDueDate)),
                     amount: parseFloat(amount) || 0,
                     paidAmount: parseFloat(paidAmount) || 0,
                     balance: parseFloat(balance ?? amount) || 0,
-                    status: status || 'Draft',
+                    status: status || 'Sent',
                     lineItems: JSON.stringify(lineItems || []),
                     notes: notes || null,
                     companyId,

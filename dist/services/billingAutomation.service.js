@@ -3,17 +3,55 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.getNewYorkDateStr = getNewYorkDateStr;
 exports.getNewYorkDate = getNewYorkDate;
+exports.calculateProratedFirstMonthRent = calculateProratedFirstMonthRent;
+exports.calculateProratedLastMonthRent = calculateProratedLastMonthRent;
 exports.parseDateUTC = parseDateUTC;
 exports.generateAutoInvoices = generateAutoInvoices;
 exports.generateAutoLateFees = generateAutoLateFees;
 const database_1 = __importDefault(require("../config/database"));
 const email_service_1 = require("./email.service");
+// Helper function to get YYYY-MM-DD in America/New_York timezone
+function getNewYorkDateStr(input) {
+    const d = input ? (input instanceof Date ? input : new Date(input)) : new Date();
+    if (isNaN(d.getTime())) {
+        return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    }
+    return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
 // Helper function to get current Date at midnight (00:00:00 UTC) matching America/New_York timezone date
 function getNewYorkDate() {
-    const nyDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const nyDateStr = getNewYorkDateStr();
     const [year, month, day] = nyDateStr.split('-').map(Number);
     return new Date(Date.UTC(year, month - 1, day));
+}
+// Calculate inclusive prorated rent for the 1st month based on NY calendar days
+function calculateProratedFirstMonthRent(monthlyRent, startDateUTC) {
+    const year = startDateUTC.getUTCFullYear();
+    const month = startDateUTC.getUTCMonth();
+    const day = startDateUTC.getUTCDate();
+    const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    const remainingDays = Math.max(1, daysInMonth - day + 1);
+    const isProrated = day > 1;
+    const amount = isProrated
+        ? Math.round((monthlyRent / daysInMonth) * remainingDays * 100) / 100
+        : monthlyRent;
+    return { amount, isProrated, daysInMonth, remainingDays };
+}
+// Calculate inclusive prorated rent for the last month (1st through endDay, or startDay through endDay if same month)
+function calculateProratedLastMonthRent(monthlyRent, endDateUTC, sameMonthStartUTC) {
+    const year = endDateUTC.getUTCFullYear();
+    const month = endDateUTC.getUTCMonth();
+    const endDay = endDateUTC.getUTCDate();
+    const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    const startDay = sameMonthStartUTC ? sameMonthStartUTC.getUTCDate() : 1;
+    const remainingDays = Math.max(1, endDay - startDay + 1);
+    const isProrated = remainingDays < daysInMonth;
+    const amount = isProrated
+        ? Math.round((monthlyRent / daysInMonth) * remainingDays * 100) / 100
+        : monthlyRent;
+    return { amount, isProrated, daysInMonth, remainingDays };
 }
 // Helper function to parse YYYY-MM-DD string into midnight UTC Date
 function parseDateUTC(dateStr) {
@@ -51,6 +89,8 @@ async function generateAutoInvoices() {
                 tenant: true,
                 property: true,
                 unit: true,
+                renewal: true,
+                moveOut: true,
             },
         });
         for (const lease of activeLeases) {
@@ -63,9 +103,19 @@ async function generateAutoInvoices() {
                 : parseDateUTC(lease.startDate.toISOString());
             if (!start || start > today)
                 continue;
-            const end = lease.endDate ? parseDateUTC(lease.endDate.toISOString()) : new Date(Date.UTC(2099, 11, 31));
+            let end = lease.endDate ? parseDateUTC(lease.endDate.toISOString()) : new Date(Date.UTC(2099, 11, 31));
             if (!end)
                 continue;
+            // If an active MoveOut is scheduled earlier than lease.endDate, stop & prorate at moveOut.scheduledDate
+            if (lease.moveOut && lease.moveOut.status !== 'CANCELLED' && lease.moveOut.scheduledDate) {
+                const moveOutEnd = parseDateUTC(lease.moveOut.scheduledDate.toISOString());
+                if (moveOutEnd && moveOutEnd < end) {
+                    end = moveOutEnd;
+                }
+            }
+            // Option A: If renewal was accepted for this lease, tenant continues into next lease without end-month proration
+            const isRenewalAccepted = lease.renewal?.status === 'ACCEPTED';
+            const endYearMonth = end.toISOString().slice(0, 7);
             // Verify today is not past lease end date
             const limitDate = today < end ? today : end;
             // Batch fetch existing rent invoices for this tenant to avoid connection pool exhaustion
@@ -80,15 +130,34 @@ async function generateAutoInvoices() {
                     dueDate: true,
                 },
             });
-            const existingDueDates = new Set(existingInvoices.map((i) => i.dueDate));
+            // Deduplicate by YYYY-MM so a month never gets two rent invoices (e.g. 1st vs 10th/15th)
+            const existingYearMonths = new Set(existingInvoices
+                .map((i) => String(i.dueDate || '').slice(0, 7))
+                .filter(Boolean));
             let elapsedMonths = 0;
             let currentBillingDate = new Date(start.getTime());
             while (currentBillingDate <= limitDate) {
                 const billingDateStr = currentBillingDate.toISOString().split('T')[0];
-                if (!existingDueDates.has(billingDateStr)) {
+                const billingYearMonth = billingDateStr.slice(0, 7);
+                if (!existingYearMonths.has(billingYearMonth)) {
                     const tenantName = lease.tenant ? `${lease.tenant.firstName || ''} ${lease.tenant.lastName || ''}`.trim() : 'Tenant';
+                    const isFirstMonth = elapsedMonths === 0;
+                    const isLastMonth = !isRenewalAccepted && billingYearMonth === endYearMonth;
+                    const proration = isFirstMonth && isLastMonth
+                        ? calculateProratedLastMonthRent(lease.rentAmount, end, start)
+                        : isFirstMonth
+                            ? calculateProratedFirstMonthRent(lease.rentAmount, start)
+                            : isLastMonth
+                                ? calculateProratedLastMonthRent(lease.rentAmount, end)
+                                : { amount: lease.rentAmount, isProrated: false, daysInMonth: 0, remainingDays: 0 };
+                    const invoiceAmount = proration.amount;
                     const lineItems = [
-                        { description: 'Rent Charge', amount: lease.rentAmount },
+                        {
+                            description: proration.isProrated
+                                ? `Prorated Rent Charge (${proration.remainingDays}/${proration.daysInMonth} days)`
+                                : 'Rent Charge',
+                            amount: invoiceAmount,
+                        },
                     ];
                     const createdInvoice = await database_1.default.invoice.create({
                         data: {
@@ -98,32 +167,28 @@ async function generateAutoInvoices() {
                             propertyName: lease.property?.name || 'Property',
                             unitNumber: lease.unit?.unitNumber || 'Unit',
                             dueDate: billingDateStr,
-                            amount: lease.rentAmount,
-                            balance: lease.rentAmount,
+                            amount: invoiceAmount,
+                            balance: invoiceAmount,
                             paidAmount: 0,
                             status: 'Sent',
                             lineItems: JSON.stringify(lineItems),
-                            notes: `Auto-generated rent invoice for billing cycle starting ${billingDateStr}`,
+                            notes: proration.isProrated
+                                ? `Auto-generated prorated rent invoice for ${billingDateStr} (${proration.remainingDays}/${proration.daysInMonth} days)`
+                                : `Auto-generated rent invoice for billing cycle starting ${billingDateStr}`,
                             companyId: lease.companyId,
                         },
                     });
-                    existingDueDates.add(billingDateStr);
-                    console.log(`[Auto-Billing (NY)] Created invoice for ${tenantName} for cycle date ${billingDateStr} (amount: $${lease.rentAmount})`);
+                    existingYearMonths.add(billingYearMonth);
+                    console.log(`[Auto-Billing (NY)] Created invoice for ${tenantName} for cycle date ${billingDateStr} (amount: $${invoiceAmount})`);
                     if (lease.companyId && createdInvoice.tenantId) {
                         email_service_1.emailService.sendInvoiceGeneratedEmail(lease.companyId, createdInvoice).catch((err) => {
                             console.error('[Auto-Billing Invoice Email Trigger] Error:', err);
                         });
                     }
                 }
-                // Advance to the next billing cycle month
+                // Advance to the 1st of the next billing cycle month (2nd month onwards is always 1st of month)
                 elapsedMonths++;
-                const nextDate = new Date(start.getTime());
-                nextDate.setUTCMonth(start.getUTCMonth() + elapsedMonths);
-                const expectedMonth = (start.getUTCMonth() + elapsedMonths) % 12;
-                if (nextDate.getUTCMonth() !== expectedMonth) {
-                    nextDate.setUTCDate(0);
-                }
-                currentBillingDate = nextDate;
+                currentBillingDate = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + elapsedMonths, 1));
             }
         }
     }

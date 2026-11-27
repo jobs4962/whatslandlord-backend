@@ -42,6 +42,7 @@ const appError_1 = require("../utils/appError");
 const crypto_1 = require("../utils/crypto");
 const whatsapp_service_1 = require("./whatsapp.service");
 const crypto = __importStar(require("crypto"));
+const billingAutomation_service_1 = require("./billingAutomation.service");
 class PaymentService {
     /**
      * Get active payment gateway configuration for a specific property or company fallback
@@ -777,9 +778,9 @@ class PaymentService {
         }
         return database_1.default.$transaction(async (tx) => {
             const payMonth = payment.dueDate
-                ? new Date(payment.dueDate).toISOString().slice(0, 7)
+                ? (0, billingAutomation_service_1.getNewYorkDateStr)(payment.dueDate).slice(0, 7)
                 : payment.paidDate
-                    ? new Date(payment.paidDate).toISOString().slice(0, 7)
+                    ? (0, billingAutomation_service_1.getNewYorkDateStr)(payment.paidDate).slice(0, 7)
                     : '';
             const rawTenantInvoices = await tx.invoice.findMany({
                 where: { tenantId: payment.tenantId },
