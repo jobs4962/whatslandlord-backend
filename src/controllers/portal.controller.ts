@@ -166,18 +166,51 @@ export class PortalController {
         ? new Date(activeLease.endDate).toISOString().split('T')[0] 
         : 'N/A';
 
-      // Find all unpaid invoices
-      const unpaidInvoices = await prisma.invoice.findMany({
+      // Fetch tenant's payments to dynamically reconcile invoice balances
+      const tenantPayments = await prisma.rentPayment.findMany({
+        where: {
+          OR: [
+            { tenantId: tenant.id },
+            ...(tenant.unitId ? [{ unitId: tenant.unitId }] : []),
+          ],
+          status: { in: ['Paid', 'PartiallyPaid', 'Cleared'] as any },
+        },
+      });
+
+      const allTenantInvoices = await prisma.invoice.findMany({
         where: { 
           tenantId: tenant.id, 
-          status: { in: ['Sent', 'Overdue', 'Partially Paid', 'Unpaid', 'Pending'] } 
+          status: { notIn: ['Draft', 'Void', 'Cancelled'] } 
         },
         orderBy: {
           dueDate: 'asc'
         }
       });
 
-      const outstandingBalance = unpaidInvoices.reduce((sum, inv) => sum + (inv.balance || 0), 0);
+      // Reconcile each invoice with matched payments by invoiceId or billing month
+      const reconciledInvoices = allTenantInvoices.map((inv) => {
+        const invMonth = String(inv.dueDate || '').slice(0, 7);
+        const matchedPays = tenantPayments.filter((p: any) => {
+          if (p.invoiceId && p.invoiceId === inv.id) return true;
+          const pMonth = String(p.dueDate || p.paidDate || '').slice(0, 7);
+          return pMonth && pMonth === invMonth;
+        });
+
+        const paidFromPayments = matchedPays.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+        const effectivePaid = Math.max(Number(inv.paidAmount || 0), paidFromPayments);
+        const invAmount = Number(inv.amount || 0);
+        const effectiveBal = Math.max(0, Math.round((invAmount - effectivePaid) * 100) / 100);
+
+        return {
+          ...inv,
+          paidAmount: effectivePaid,
+          balance: effectiveBal,
+          isUnpaid: effectiveBal > 0,
+        };
+      });
+
+      const unpaidInvoices = reconciledInvoices.filter((inv) => inv.isUnpaid);
+      const outstandingBalance = Math.round(unpaidInvoices.reduce((sum, inv) => sum + inv.balance, 0) * 100) / 100;
       
       // The oldest unpaid invoice is the next one due
       const oldestUnpaid = unpaidInvoices[0];
