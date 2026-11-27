@@ -184,7 +184,7 @@ class InvoiceController {
           amount: parseFloat(amount) || 0,
           paidAmount: parseFloat(paidAmount) || 0,
           balance: parseFloat(balance ?? amount) || 0,
-          status: status || 'Draft',
+          status: status || 'Sent',
           lineItems: JSON.stringify(lineItems || []),
           notes: notes || null,
           companyId,
