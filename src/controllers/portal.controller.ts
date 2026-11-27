@@ -167,14 +167,19 @@ export class PortalController {
         : 'N/A';
 
       // Fetch tenant's payments to dynamically reconcile invoice balances
-      const tenantPayments = await prisma.rentPayment.findMany({
+      const allTenantPayments = await prisma.rentPayment.findMany({
         where: {
           OR: [
             { tenantId: tenant.id },
             ...(tenant.unitId ? [{ unitId: tenant.unitId }] : []),
           ],
-          status: { in: ['Paid', 'PartiallyPaid', 'Cleared'] as any },
         },
+      });
+
+      // Filter to successful/cleared payments
+      const tenantPayments = allTenantPayments.filter((p: any) => {
+        const s = String(p.status || '').toLowerCase();
+        return s === 'paid' || s === 'partiallypaid' || s === 'cleared';
       });
 
       const allTenantInvoices = await prisma.invoice.findMany({
