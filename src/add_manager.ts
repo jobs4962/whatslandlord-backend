@@ -16,6 +16,8 @@ async function main() {
     where: { name: 'Property Manager' }
   });
 
+
+  
   if (!role) {
     throw new Error('Property Manager role not found in database.');
   }
