@@ -3499,33 +3499,47 @@ export class PortalController {
         throw new Error('Question is required.');
       }
 
-      // Fetch active lease details
-      const leaseRec: any = tenant ? await prisma.lease.findFirst({
+      if (!tenant) {
+        return sendSuccess({
+          res,
+          data: {
+            question,
+            answer: 'Your resident profile could not be verified. Please log in with your tenant account to view your lease details.',
+            leaseContext: null,
+          },
+        });
+      }
+
+      // Fetch active lease details strictly for the logged-in tenant
+      const leaseRec: any = await prisma.lease.findFirst({
         where: { tenantId: tenant.id },
         include: { property: true, unit: true },
         orderBy: { startDate: 'desc' },
-      }) : null;
+      });
 
-      const rentAmount = leaseRec?.rentAmount || (tenant?.unit?.rentAmount || 0);
-      const depositAmount = leaseRec?.depositAmount || (tenant?.unit?.securityDeposit || 0);
-      const leaseStart = leaseRec?.startDate ? new Date(leaseRec.startDate).toLocaleDateString() : 'N/A';
-      const leaseEnd = leaseRec?.endDate ? new Date(leaseRec.endDate).toLocaleDateString() : 'N/A';
-      const propertyName = leaseRec?.property?.name || tenant?.unit?.property?.name || 'Property';
-      const unitNumber = leaseRec?.unit?.unitNumber || tenant?.unit?.unitNumber || 'Unit';
+      const rentAmount = Number(leaseRec?.rentAmount ?? tenant.unit?.rentAmount ?? 0);
+      const depositAmount = Number(leaseRec?.depositAmount ?? tenant.unit?.securityDeposit ?? 0);
+      const leaseStart = leaseRec?.startDate ? new Date(leaseRec.startDate).toISOString().split('T')[0] : 'N/A';
+      const leaseEnd = leaseRec?.endDate ? new Date(leaseRec.endDate).toISOString().split('T')[0] : 'N/A';
+      const leaseStatus = leaseRec?.status || 'No active lease on file';
+      const propertyName = leaseRec?.property?.name || tenant.unit?.property?.name || 'Property';
+      const unitNumber = leaseRec?.unit?.unitNumber || tenant.unit?.unitNumber || 'Unit';
+      const unitObj: any = leaseRec?.unit || tenant.unit;
+      const lateFeeInfo = unitObj?.isLateFeeEnabled
+        ? `Enabled (${unitObj.lateFeeType || 'FLAT'}: $${Number(unitObj.lateFeeAmount || 0)}, grace period: ${Number(unitObj.lateFeeGraceDays ?? 0)} days)`
+        : 'Not enabled on this unit in the system';
+      const customTerms = leaseRec?.notes || leaseRec?.terms || 'No additional custom lease notes recorded.';
 
       const leaseSummaryText = `
-Active Lease Overview:
-- Tenant Name: ${tenant ? `${tenant.firstName} ${tenant.lastName}` : 'Resident'}
-- Property: ${propertyName}, Unit ${unitNumber}
-- Monthly Rent: $${rentAmount} (Due on 1st of every month)
-- Security Deposit: $${depositAmount}
+Logged-In Tenant Lease Data (STRICTLY FOR THIS RESIDENT ONLY):
+- Tenant Name: ${tenant.firstName} ${tenant.lastName}
+- Property & Unit: ${propertyName}, Unit ${unitNumber}
+- Lease Status: ${leaseStatus}
+- Monthly Rent: $${rentAmount.toFixed(2)}
+- Security Deposit: $${depositAmount.toFixed(2)}
 - Lease Term: ${leaseStart} to ${leaseEnd}
-- Late Fee Policy: $50 late fee applied after 5th of the month.
-- Pet Policy: Pets allowed with written management authorization & $250 pet deposit. No aggressive breeds.
-- Included Utilities: Water, Trash removal, and Sewage included in rent. Electricity & Gas paid by tenant.
-- Notice Period / Early Move-out: 30-day written notice required before moving out. 1-month rent penalty applies for early lease termination.
-- Subletting / Short-term Rental: Subletting or Airbnb hosting is strictly prohibited.
-- Maintenance & Repairs: Emergency repairs handled by property management. Resident responsible for minor lightbulb replacements and keeping property clean.
+- Late Fee Setting (from unit record): ${lateFeeInfo}
+- Lease Notes / Terms: ${customTerms}
       `.trim();
 
       const openAiApiKey = process.env.OPENAI_API_KEY || '';
@@ -3544,12 +3558,20 @@ Active Lease Overview:
               messages: [
                 {
                   role: 'system',
-                  content: `You are the official 24/7 AI Lease Assistant for WhatsLandlord Property Management. Answer the resident's question accurately, warmly, and concisely (under 80 words) based strictly on their signed lease agreement context:\n\n${leaseSummaryText}`,
+                  content: `You are the official WhatsLandlord Lease Assistant for this logged-in tenant ONLY.
+RULES:
+1. Answer ONLY using the exact verified lease data below and WhatsLandlord Tenant Portal features (Lease tab, Documents tab, Payments tab).
+2. NEVER invent policies, fees, or dates (do not guess pet deposits, utility rules, or notice penalties unless explicitly written in the data below). If a detail is not recorded, say it is not specified in your digital lease record and advise contacting the Property Manager via Messages.
+3. NEVER mention or infer any other tenant's or property's data.
+4. If the user asks anything unrelated to their lease or WhatsLandlord portal, politely refuse in 1 sentence and state you only assist with their lease and tenant portal.
+5. Keep replies concise (under 80 words).
+
+${leaseSummaryText}`,
                 },
                 { role: 'user', content: question },
               ],
-              temperature: 0.3,
-              max_tokens: 200,
+              temperature: 0.1,
+              max_tokens: 180,
             }),
           });
 
@@ -3562,23 +3584,17 @@ Active Lease Overview:
         }
       }
 
-      // Smart rule-based fallback if OpenAI call failed or key not configured
+      // Smart rule-based fallback using strictly real DB fields
       if (!aiAnswer) {
         const qLower = question.toLowerCase();
-        if (qLower.includes('pet') || qLower.includes('dog') || qLower.includes('cat') || qLower.includes('animal')) {
-          aiAnswer = `Yes! Pets are allowed under your lease with prior written management approval and a $250 pet deposit. Aggressive breeds are prohibited.`;
-        } else if (qLower.includes('late') || qLower.includes('fee') || qLower.includes('due') || qLower.includes('grace')) {
-          aiAnswer = `Rent is due on the 1st of every month ($${rentAmount}). A grace period is provided until the 5th; after the 5th, a $50 late fee is automatically applied to your account balance.`;
-        } else if (qLower.includes('utility') || qLower.includes('utilities') || qLower.includes('water') || qLower.includes('electric') || qLower.includes('trash') || qLower.includes('gas')) {
-          aiAnswer = `Your rent includes Water, Sewage, and Trash removal services. Electricity and Gas accounts must be setup and paid directly by you.`;
-        } else if (qLower.includes('notice') || qLower.includes('move out') || qLower.includes('terminate') || qLower.includes('break') || qLower.includes('end lease')) {
-          aiAnswer = `Your lease ends on ${leaseEnd}. You must provide a written 30-day notice before move-out. Breaking your lease early incurs a 1-month rent termination fee.`;
-        } else if (qLower.includes('sublet') || qLower.includes('airbnb') || qLower.includes('guest')) {
-          aiAnswer = `Subletting your apartment or hosting short-term rentals (such as Airbnb) is strictly prohibited under Clause 14 of your lease agreement.`;
+        if (qLower.includes('late') || qLower.includes('fee') || qLower.includes('grace')) {
+          aiAnswer = `Late fee policy on your unit (${unitNumber}): ${lateFeeInfo}. Monthly rent is $${rentAmount.toLocaleString()}.`;
         } else if (qLower.includes('deposit') || qLower.includes('security')) {
-          aiAnswer = `Your security deposit is $${depositAmount}. It will be fully refunded within 30 days of move-out, minus any documented repair costs for tenant damages beyond normal wear and tear.`;
+          aiAnswer = `Your recorded security deposit for ${propertyName} (Unit ${unitNumber}) is $${depositAmount.toLocaleString()}.`;
+        } else if (qLower.includes('start') || qLower.includes('end') || qLower.includes('expir') || qLower.includes('term') || qLower.includes('lease') || qLower.includes('rent')) {
+          aiAnswer = `Your ${leaseStatus} lease for ${propertyName} (Unit ${unitNumber}) runs from ${leaseStart} to ${leaseEnd} with monthly rent of $${rentAmount.toLocaleString()} and security deposit of $${depositAmount.toLocaleString()}.`;
         } else {
-          aiAnswer = `According to your active lease for ${propertyName} (Unit ${unitNumber}), rent is $${rentAmount}/month due on the 1st. Please contact your property manager if you need specific contractual addendums!`;
+          aiAnswer = `I can only answer questions about your WhatsLandlord lease (${propertyName}, Unit ${unitNumber}: $${rentAmount.toLocaleString()}/mo, term ${leaseStart} to ${leaseEnd}). For other lease clauses, please message your Property Manager.`;
         }
       }
 
@@ -3610,52 +3626,105 @@ Active Lease Overview:
         throw new Error('Message is required.');
       }
 
-      // Fetch Tenant real-time context
-      const leaseRec: any = tenant ? await prisma.lease.findFirst({
-        where: { tenantId: tenant.id },
-        include: { property: true, unit: true },
-        orderBy: { startDate: 'desc' },
-      }) : null;
+      if (!tenant) {
+        return sendSuccess({
+          res,
+          data: {
+            message,
+            reply: 'Your tenant account could not be verified. Please log in as a tenant to view your rent, invoices, lease, and maintenance data.',
+            contextSummary: null,
+          },
+        });
+      }
 
-      const tenantFullNameAI = tenant ? `${tenant.firstName || ''} ${tenant.lastName || ''}`.trim() : '';
-      const activeMaintenance = tenant ? await prisma.serviceRequest.findMany({
-        where: {
-          OR: [
-            { tenantId: tenant.id },
-            ...(tenantFullNameAI && tenant.unit?.unitNumber
-              ? [{
-                  tenantName: tenantFullNameAI,
-                  unitNumber: tenant.unit.unitNumber,
-                  ...(tenant.unit.property?.name ? { propertyName: tenant.unit.property.name } : {}),
-                  ...(tenant.companyId ? { companyId: tenant.companyId } : {}),
-                }]
-              : []),
-          ],
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 3,
-      }) : [];
+      // Fetch strictly THIS logged-in tenant's real-time accounting, lease & maintenance data
+      const [leaseRec, tenantInvoices, tenantPayments, activeMaintenance]: any[] = await Promise.all([
+        prisma.lease.findFirst({
+          where: { tenantId: tenant.id },
+          include: { property: true, unit: true },
+          orderBy: { startDate: 'desc' },
+        }),
+        prisma.invoice.findMany({
+          where: {
+            tenantId: tenant.id,
+            status: { notIn: ['Draft', 'Void', 'Cancelled'] },
+          },
+          orderBy: { dueDate: 'asc' },
+        }),
+        prisma.rentPayment.findMany({
+          where: { tenantId: tenant.id },
+          orderBy: { paidDate: 'desc' },
+        }),
+        prisma.serviceRequest.findMany({
+          where: { tenantId: tenant.id },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+        }),
+      ]);
 
-      const rentAmount = leaseRec?.rentAmount || (tenant?.unit?.rentAmount || 0);
-      const propertyName = leaseRec?.property?.name || tenant?.unit?.property?.name || 'Property';
-      const unitNumber = leaseRec?.unit?.unitNumber || tenant?.unit?.unitNumber || 'Unit';
-      const tenantName = tenant ? `${tenant.firstName} ${tenant.lastName}` : 'Resident';
+      const rentAmount = Number(leaseRec?.rentAmount ?? tenant.unit?.rentAmount ?? 0);
+      const depositAmount = Number(leaseRec?.depositAmount ?? tenant.unit?.securityDeposit ?? 0);
+      const propertyName = leaseRec?.property?.name || tenant.unit?.property?.name || 'Property';
+      const unitNumber = leaseRec?.unit?.unitNumber || tenant.unit?.unitNumber || 'Unit';
+      const tenantName = `${tenant.firstName || ''} ${tenant.lastName || ''}`.trim() || 'Resident';
+      const leaseStart = leaseRec?.startDate ? new Date(leaseRec.startDate).toISOString().split('T')[0] : 'N/A';
+      const leaseEnd = leaseRec?.endDate ? new Date(leaseRec.endDate).toISOString().split('T')[0] : 'N/A';
 
-      // Latest maintenance status
+      // Real accounting calculations from this tenant's invoices & payments ONLY
+      const unpaidInvoices = tenantInvoices.filter((inv: any) => {
+        const st = String(inv.status || '').toLowerCase().trim();
+        if (st === 'paid' || st === 'fully paid' || st === 'fullypaid') return false;
+        const bal = inv.balance !== null && inv.balance !== undefined
+          ? Number(inv.balance)
+          : Math.max(0, Number(inv.amount || 0) - Number(inv.paidAmount || 0));
+        return bal > 0;
+      });
+      const outstandingBalance = Number(
+        unpaidInvoices.reduce((sum: number, inv: any) => {
+          const bal = inv.balance !== null && inv.balance !== undefined
+            ? Number(inv.balance)
+            : Math.max(0, Number(inv.amount || 0) - Number(inv.paidAmount || 0));
+          return sum + Math.max(0, bal);
+        }, 0).toFixed(2)
+      );
+      const nextUnpaid = unpaidInvoices[0] || null;
+      const nextDueAmount = nextUnpaid
+        ? Number((nextUnpaid.balance ?? Math.max(0, Number(nextUnpaid.amount || 0) - Number(nextUnpaid.paidAmount || 0))).toFixed(2))
+        : 0;
+      const nextDueDate = nextUnpaid?.dueDate ? String(nextUnpaid.dueDate).split('T')[0] : 'None';
+
+      const paidPayments = tenantPayments.filter((p: any) => ['Paid', 'PartiallyPaid'].includes(String(p.status || '')));
+      const totalPaid = Number(paidPayments.reduce((s: number, p: any) => s + Number(p.amount || 0), 0).toFixed(2));
+      const latestPayment = paidPayments[0] || null;
+      const latestPaymentSummary = latestPayment
+        ? `$${Number(latestPayment.amount || 0).toFixed(2)} on ${latestPayment.paidDate ? new Date(latestPayment.paidDate).toISOString().split('T')[0] : 'N/A'} (${latestPayment.paymentMethod || 'Payment'})`
+        : 'No payments recorded yet';
+
+      const unpaidSummaryList = unpaidInvoices.slice(0, 4).map((inv: any) => {
+        const bal = inv.balance !== null && inv.balance !== undefined
+          ? Number(inv.balance)
+          : Math.max(0, Number(inv.amount || 0) - Number(inv.paidAmount || 0));
+        return `${String(inv.dueDate || '').split('T')[0]}: $${bal.toFixed(2)} (${inv.status})`;
+      }).join(' | ') || 'All invoices paid';
+
+      // Maintenance summary strictly for this tenant
       const latestTicket = activeMaintenance.length > 0 ? activeMaintenance[0] : null;
-      const maintenanceSummary = latestTicket
-        ? `Latest Ticket #${latestTicket.id.slice(0, 6)}: "${latestTicket.title}" | Status: ${latestTicket.status} | Vendor: ${latestTicket.assignedVendorName || 'Assigned'}`
-        : 'No open maintenance requests.';
+      const maintenanceSummary = activeMaintenance.length > 0
+        ? activeMaintenance.slice(0, 3).map((t: any) => `"${t.title}" (${t.status})`).join(', ')
+        : 'No maintenance requests.';
 
       const tenantContextText = `
-Tenant Portal Context:
+Logged-In Tenant Live Account & Accounting Data (STRICTLY FOR THIS TENANT ONLY):
 - Resident Name: ${tenantName}
 - Property & Unit: ${propertyName}, Unit ${unitNumber}
-- Monthly Rent: $${rentAmount} (Due on 1st of every month, 5-day grace period)
-- Next Rent Payment Status: $${rentAmount} due on August 1, 2026
-- Maintenance Request Status: ${maintenanceSummary}
-- Lease Document: Active agreement available on the Lease page.
-- Available Navigation Options: Dashboard (/tenant), Lease (/tenant/lease), Payments (/tenant/payments), Maintenance (/tenant/maintenance), Documents (/tenant/documents), Messages (/tenant/messages).
+- Lease Term: ${leaseStart} to ${leaseEnd} | Status: ${leaseRec?.status || 'N/A'} | Monthly Rent: $${rentAmount.toFixed(2)} | Security Deposit: $${depositAmount.toFixed(2)}
+- Total Outstanding Balance Due: $${outstandingBalance.toFixed(2)} (${unpaidInvoices.length} unpaid/partial invoices)
+- Earliest Due Invoice: $${nextDueAmount.toFixed(2)} due on ${nextDueDate}
+- Unpaid Invoices Breakdown: ${unpaidSummaryList}
+- Total Paid to Date: $${totalPaid.toFixed(2)} (${paidPayments.length} payments)
+- Latest Payment: ${latestPaymentSummary}
+- Maintenance Requests (${activeMaintenance.length}): ${maintenanceSummary}
+- Portal Navigation: Dashboard (/tenant), Lease (/tenant/lease), Payments (/tenant/payments), Maintenance (/tenant/maintenance), Documents (/tenant/documents), Messages (/tenant/messages).
       `.trim();
 
       const openAiApiKey = process.env.OPENAI_API_KEY || '';
@@ -3674,11 +3743,19 @@ Tenant Portal Context:
               messages: [
                 {
                   role: 'system',
-                  content: `You are the official 24/7 AI Tenant Concierge assistant for WhatsLandlord. Help the resident warmly, clearly, and concisely (under 75 words) based on their live real-time account data:\n\n${tenantContextText}`,
+                  content: `You are the WhatsLandlord Tenant Portal AI Assistant for ${tenantName} ONLY.
+STRICT RULES:
+1. Answer ONLY using the logged-in tenant's real accounting, lease, maintenance, and portal data provided below.
+2. NEVER invent or guess dates, dollar amounts, or facts not in the data below. Quote exact numbers from the data.
+3. NEVER reveal, mention, or speculate about any other tenant, unit, or property.
+4. Stay strictly on-topic: ONLY answer questions about this tenant's WhatsLandlord account (rent, invoices, balance due, payments, lease, maintenance tickets, documents) or how to use the Tenant Portal. For any unrelated, off-topic, nonsensical, or inappropriate message, politely refuse in 1 short sentence and state what you can help with (rent balance, payments, lease, maintenance, documents).
+5. Keep every answer concise (under 75 words).
+
+${tenantContextText}`,
                 },
                 { role: 'user', content: message },
               ],
-              temperature: 0.3,
+              temperature: 0.1,
               max_tokens: 180,
             }),
           });
@@ -3692,23 +3769,27 @@ Tenant Portal Context:
         }
       }
 
-      // Smart rule engine fallback
+      // Smart rule engine fallback strictly using real DB values
       if (!replyText) {
         const mLower = message.toLowerCase();
-        if (mLower.includes('rent') || mLower.includes('bill') || mLower.includes('due') || mLower.includes('pay')) {
-          replyText = `Your next rent bill of $${rentAmount} is due on August 1, 2026. You can pay securely online from the 'Payments' tab in your portal.`;
+        if (mLower.includes('rent') || mLower.includes('bill') || mLower.includes('due') || mLower.includes('pay') || mLower.includes('balance') || mLower.includes('invoice') || mLower.includes('owe')) {
+          if (outstandingBalance > 0) {
+            replyText = `Your current outstanding balance is $${outstandingBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} across ${unpaidInvoices.length} invoice(s). Earliest due: $${nextDueAmount.toLocaleString()} (Due: ${nextDueDate}). You can pay from the Payments tab.`;
+          } else {
+            replyText = `You have $0.00 outstanding balance — all your invoices are paid! Total paid to date: $${totalPaid.toLocaleString()}.`;
+          }
         } else if (mLower.includes('maintenance') || mLower.includes('repair') || mLower.includes('status') || mLower.includes('ticket') || mLower.includes('work order')) {
           if (latestTicket) {
-            replyText = `Your active repair ticket "${latestTicket.title}" is currently in '${latestTicket.status}' status (Assigned to ${latestTicket.assignedVendorName || 'Technician'}). You can check updates on the 'Maintenance' tab!`;
+            replyText = `Your latest repair ticket "${latestTicket.title}" is currently '${latestTicket.status}' (Assigned to ${latestTicket.assignedVendorName || 'Technician'}). Check full updates on the Maintenance tab.`;
           } else {
-            replyText = `You currently have no open maintenance tickets. To report an issue, click '+ Create Request' on the 'Maintenance' tab!`;
+            replyText = `You currently have no maintenance requests on record. You can submit one anytime from the Maintenance tab.`;
           }
-        } else if (mLower.includes('lease') || mLower.includes('download') || mLower.includes('agreement') || mLower.includes('contract')) {
-          replyText = `You can view your active lease terms and download your signed agreement directly from the 'Lease' tab in your left menu!`;
+        } else if (mLower.includes('lease') || mLower.includes('download') || mLower.includes('agreement') || mLower.includes('contract') || mLower.includes('deposit')) {
+          replyText = `Your lease for ${propertyName} (Unit ${unitNumber}) runs from ${leaseStart} to ${leaseEnd} at $${rentAmount.toLocaleString()}/month (Deposit: $${depositAmount.toLocaleString()}). View/download it on the Lease tab.`;
         } else if (mLower.includes('document') || mLower.includes('file') || mLower.includes('upload')) {
-          replyText = `You can view or upload official documents (insurance, ID, move-in photos) under the 'Documents' tab.`;
+          replyText = `You can view or upload your documents under the Documents tab in your Tenant Portal.`;
         } else {
-          replyText = `Hello ${tenantName}! I'm your 24/7 AI Concierge. I can help you check rent bills ($${rentAmount}), track maintenance ticket status, or locate your signed lease contract!`;
+          replyText = `I can only assist with your WhatsLandlord tenant account (${tenantName}, ${propertyName} Unit ${unitNumber}) — such as your $${outstandingBalance.toLocaleString()} balance due, payment history, lease details, maintenance tickets, or documents.`;
         }
       }
 
@@ -3718,8 +3799,12 @@ Tenant Portal Context:
           message,
           reply: replyText,
           contextSummary: {
-            rentDue: `$${rentAmount} on Aug 1, 2026`,
-            activeTicketStatus: latestTicket ? latestTicket.status : 'None',
+            resident: tenantName,
+            unit: `${propertyName} - Unit ${unitNumber}`,
+            monthlyRent: rentAmount,
+            outstandingBalance,
+            unpaidInvoicesCount: unpaidInvoices.length,
+            latestTicketStatus: latestTicket?.status || 'None',
           },
         },
       });
